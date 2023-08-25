@@ -1,0 +1,61 @@
+# caution: printed output interferes with dag output
+verbose: True
+
+# if True, exit if no sample info csv is found
+use_csv: True
+
+# what to do if filename does not match regex or regex_fallback
+no_match: "skip"
+# no_match: "quit"
+
+# unaligned bams (ubams) are our usual starting point, but the
+# first step is converting them to fastq files for mapping
+input_type: "bam"
+# input_type: "fastq"
+# input_type: "fasta"
+
+ref_path: "/refs"
+ref_subdir: "ref_v3"
+# ref_fasta needs to be in ref_path/ref_subdir/
+ref_fasta: "pad100.fa"
+## ref_meta can be elsewhere, so give full path
+ref_meta: "/refs/ref_v3/pad100.fa.yaml"
+
+# paired_end = True is not implemented, and will require various changes.
+# could merge overlapping PE reads as a preprocessing step to get SE reads,
+#  or modify UMAP -> fastq, mapping, and extraction steps
+paired_end: False
+
+# regex for extracting ID in Barcode column of sample_info from bam filename:
+# Just the part in parentheses is extracted, so e.g. for filename
+# UBAM/IonXpress_001_rawlib.basecaller.bam just IonXpress_001 is extracted
+bam_id_regex: "(IonXpress_[0-9]+)_"
+bam_id_regex_fallback: "/([^/]+)\\.bam$"
+fasta_id_regex: "/([^/]+)\\.fasta(\\.gz)?$"
+fasta_id_regex_fallback: "/([^/]+)\\.(fa|fasta)(\\.gz)?$"
+
+# should not be changed
+fastq_id_regex: "fastq/([^/]+)\\.fastq.gz$"
+fastq_id_regex_fallback: "fastq/([^/]+)\\.fastq.gz$"
+
+info: "sample_info.csv"
+info_glob: "*[Ss]ample*.csv"
+info_glob_fallback: "*.csv"
+
+# how many rows to skip at start of info file before getting to header row
+info_skip_rows: 1
+
+# cols in sample_info with id (extracted from filename with regex) and new name
+id_col: "Barcode"
+id_idx: 0
+new_col: "Sample Name"
+new_col_fallback: "Sample Name (required)"
+new_idx: 2
+
+report_format: "ioslides_presentation"
+# report_format: "html_document"
+# report_format: "pdf_document"
+
+# max number of reads to retain for each ref sequence after mapping but before
+# summarizing CpG data. Increasing this will increase time and RAM requirements
+max_per_ref: 10000

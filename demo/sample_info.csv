@@ -1,0 +1,4 @@
+CSV Version (required),2.2,,,,,,,
+Barcode,Control Type,Sample Name (required),Sample ID,Sample Description,DNA/RNA/Fusions,Reference library,Target regions BED file,Hotspot regions BED file
+IonXpress_001,,demoA,,Saliva,DNA,,,
+IonXpress_002,,demoB,,Saliva,DNA,,,

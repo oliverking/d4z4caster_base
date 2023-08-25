@@ -1,0 +1,2280 @@
+---
+title: "D4Z4 methylation summary"
+output:
+  ioslides_presentation: 
+    # self_contained: no
+    widescreen: true
+    smaller: true
+  pdf_document: default
+  html_document: default
+geometry: margin=2cm
+editor_options:
+  chunk_output_type: console
+#header-includes:
+params:
+  ref_file: /Users/ok/BSS_test/refs/ref_v3/ref_v3_pad100.fa
+  in_file: /Users/ok/BSS_test/bismark_txt/any_C_context_local.o235_bismark_bt2.sorted.ds.txt.gz
+  bam_file: /Users/ok/BSS_test/bismark_bam/local.o235_bismark_bt2.sorted.ds.100.bam
+  ## bai_file: /Users/ok/BSS_test/bismark_bam/local.o235_bismark_bt2.sorted.ds.100.bam.bai
+  ## does bai get used by Gviz::AlignmentsTrack? If so, make sure it exists in snakemake
+  ser_file: /Users/ok/BSS_test/bismark_bam/local.o235_bismark_bt2_SE_report.txt
+  idx_file: /Users/ok/BSS_test/bismark_bam/local.o235_bismark_bt2.sorted.bam.idxstats
+  out_txt: report_o235.txt
+  # samp_name: samp_1
+subtitle: "`r paste('Sample name:', sub('_bismark.*$', '', sub('^.*local.', '', params$in_file)))`"
+---
+
+<style type="text/css">
+h2 { font-size: 40px !important; margin-top: -10px !important; margin-bottom: -30px; !important;}
+pre { font-size: 14px !important; line-height: 20px !important;}
+table.rmdtable td, table.rmdtable th, table td, table th {font-size: 12px !important; padding: 0.5em 0.25em !important}
+.tiny p { font-size: 12pt !important; line-height: 20px !important;}
+</style>
+
+
+```{r setup, include=FALSE}
+# table { font-size: 8px !important;}
+# .table th, td { font-size: 8px !important;}
+## TODO: add slide-specific styles with css, add to code chunks with class.source='myclass'
+
+knitr::opts_chunk$set(echo = FALSE)
+
+show_missing = F           ## include slides for refseqs that have no reads 
+show_bam = F               ## show read coverage track
+
+fit_mixture_mle = T        ## estimate parameters of beta-binomial mixture models
+show_profiles  = F         ## show likelihood profile plots
+vary_w = T                 ## allow relative contributions of alleles to vary in mixture model
+                           ## (note: fits will also be made with fixed equal weights)
+
+min_frac_CG_called = 0.9   ## just for CG in user-specified range
+max_frac_nonconvert = 0.1  ## just for CH in user-specified range
+max_reads = 100000         ## max per refseq. may need to increase RAM if much larger. 
+max_reads_lollipop = 100   ## just for lollipop plots. may need to adjust fig dimension if changed 
+
+## add config file used by both snakemake and R? JSON or yaml 
+## https://snakemake.readthedocs.io/en/stable/tutorial/advanced.html
+## configfile: "config.yaml"
+## then e.g. config["prior_mutation_rate"]
+
+max_width = 114 ## for console output in slides
+
+#library(jsonlite)
+
+# knitr::opts_knit$set(root.dir = getwd())
+
+# 0.1.2 -
+# - added 10-th and 90th percentile to output
+# - sort result seqs in same order as ref fasta
+# - rotated xlabs in a couple more plots
+# - got rid of in_path = "."
+# - adjusted CpG ranges a little
+
+# 0.1.5 -
+# - make plots for unfiltered reads even when there are no filtered reads
+
+# 0.1.7 -
+# - added some error-checking
+# - update data.tables by reference to avoid deep copies
+
+# 0.1.7b - 4/17/2023
+# - added some error-checking, bug-fix for case with no CpGs with coverage
+
+# 0.1.8 -
+# - reformatted for ioslides
+# - changed bin breaks for histograms
+# - added beta-
+
+# 0.1.8b - 5/18/2023
+# - added some error-checking, bug-fix for case with no CpGs with coverage
+
+# 0.1.9 
+# - optionally allow mixing fractions for alleles to be unequal
+
+## TODO: dedup without casting to matrix?
+
+## check bismark reports: https://nf-co.re/methylseq/dev/output
+
+# this flag tries to take the strand a bisulfite read originated from into 
+# account (this is different from ordinary DNA alignment flags!))
+
+# From http://dldcc-web.brc.bcm.edu/lilab/deqiangs/data/GO/WGBS/b5/test_bismark/bismark_v0.7.2/RELEASE_NOTES.txt
+# "This new version of the bismark2SAM conversion script introduces adjusted bitwise FLAG
+# values for non-directional single-end and for paired-end alignments. This is to better
+# reflect the strand origin of a read or a read pair. E.g., alignments to the OT strand
+# are always found in '+' orientation, whereas alignments to the CTOT strand are always found
+# in a '-' orientation. Both these alignments will now get a FLAG value of '0' indicating that
+# the read originated from the original top strand. A similar logic is also applied for
+# alignments to other strands and for paired-end alignments. Thanks to Enrique Vidal for
+# bringing this to my attention and for his contributions to this new version."
+
+# knitr::opts_knit$set(root.dir
+# options(width=120)
+# Sys.setenv(RSTUDIO_PANDOC=/Applications/RStudio.app/Contents/MacOS/pandoc)
+# Sys.getenv("RSTUDIO_PANDOC") "/Applications/RStudio.app/Contents/MacOS/pandoc"
+# knitr::knit("~/Dropbox/r_bss_summary.Rmd", output="test.html")
+# Sys.setenv(RSTUDIO_PANDOC='/usr/lib/rstudio-server/bin/pandoc')
+# rmarkdown::render("~/Dropbox/r_bss_summary.Rmd", params=list(ref_file="ref_100b/bss_ref_100b.fa",in_file= "any_C_context_local.PLJ10067_bismark_hisat2.txt.gz"), output_file="~/oktest_PLJ10067.html")
+
+```
+
+```{r init, include=F}
+
+library(Biostrings)
+library(ggplot2)
+library(reshape2)
+library(knitr)
+library(gridExtra)
+library(data.table)
+library(R.utils)
+library(Gviz)
+library(cowplot)
+library(bbmle)
+library(emdbook)
+library(ggbeeswarm)
+
+```
+
+```{r load, include=F}
+
+# out_path = "." ## 
+# if (!dir.exists(out_path)) dir.create(out_path)
+
+# ref_path = "~/bisulfite_2020/"
+# ref_file =  "ref_100b/bss_ref_100b.fa"
+# ref_file = "~/bss_docker_v3/refs/ref_v3_pad100.fa"
+
+ref_file = params$ref_file  
+ref = readDNAStringSet(ref_file)
+npad = 100;
+ref2 = DNAStringSet(substr(ref, npad+1, width(ref)-npad))
+
+out_txt = file.path(params$out_txt)
+out_rdata = sub(".txt$",".RData", out_txt)
+samp_name = sub(".txt$", "", sub("report_", "", basename(out_txt)))
+
+## downsampled to  < 100 reads per seq
+bam_file = params$bam_file
+
+## TODO: pass seqnames as ranges as params?  give range in nt rather than CpG?
+## If missing then set to c(1, Inf), then later Inf is reduced to highest index in input.                  
+#BSSA: CpG 28 - 57
+#BSSX: CpG 30 – 59
+
+## TODO: allow non-contiguous ranges, i.e. cpg_indices?
+cpg_ranges = list("4AL" = c(9,29),
+                  "4B168" = c(2,13),
+                  "4A161"= c(32,56),
+                  "4A161x55"= c(32,55),
+                  "4A161_x16_x55"= c(32,55),
+                  "4A166"= c(32,55),
+                  "10A176T"= c(32,55),
+                  "BSSX" = c(32,58))
+
+if (F) { # testing
+  
+  cpg_json =  toJSON(cpg_ranges)
+  cpg_r = fromJSON(cpg_json)
+  identical(cpg_ranges, cpg_r) # orig is num, cpg_r is int
+  identical(unlist(cpg_ranges), unlist(cpg_r)) # F
+  identical(names(cpg_ranges), names(cpg_r)) ## T
+  all(unlist(cpg_ranges) == unlist(cpg_r)) # T
+  write_json(cpg_ranges, "cpg_ranges.json", pretty=T)
+  cpg_r2 = read_json("cpg_ranges.json", simplifyVector = T)
+  
+}
+
+## TODO: use relative paths?
+in_file  = params$in_file
+ser_file = params$ser_file
+bam_file = params$bam_file
+idx_file = params$idx_file
+
+has_ser = file.exists(file.path(ser_file))
+
+if (has_ser) {
+  run_info = scan(file.path(ser_file), what="character", sep="\n")
+  ## line 3 is too long to fit on one line in slide, so add break after "with the specified options:" 
+  run_info = sub("with the specified options: ", "with the specified options:\n\t", run_info)
+} else {
+  run_info = NULL
+}
+
+has_idx = file.exists(file.path(idx_file))
+
+if (has_idx) {
+  idx_info = fread(file.path(idx_file))[,1:3]
+  colnames(idx_info) = c("ref_seq", "length", "count")
+} else {
+  idx_info = NULL
+}
+
+has_bam = file.exists(file.path(bam_file))
+
+## with R utils can read gz directly
+has_in = file.exists(file.path(in_file))
+if (!has_in) stop("can't find file ", file.path(in_file))
+dat_all = fread(file.path(in_file), skip=1, stringsAsFactors=F) 
+
+colnames(dat_all) = c("read_id", "m_state", "ref_name", "position", "m_call", 
+                      "read_start", "read_end", "read_orientation")
+
+## <seq-ID>  <methylation state*>  <chromosome>  <start position (= end position)>  <methylation call>  
+## <read start>  <read end>  <read orientation>
+## Methylated cytosines receive a '+' orientation,
+## Unmethylated cytosines receive a '-' orientation.               
+# format(object.size(dat_all), units="MB")
+
+## checkpoints for garbage collection and checking memory usage
+gc1 = gc2 = gc3 = gc4 = gc5 = gc6 = "not reached"
+
+```
+
+
+```{r context, echo=F}
+
+## add new column by reference to conserve memory
+dat_all[, read_type := "any"]
+
+## add more detailed info on strand: OT, OB, CTOT, CTOB
+ctx_stubs = c(outer(c("CHG", "CpG", "CHH"), c("OT", "OB", "CTOT", "CTOB"), FUN=paste, sep="_"))
+
+for (stub in ctx_stubs) {
+  ctx_file = file.path(sub("any_C_context", stub, in_file))
+  if (file.exists(ctx_file)) {
+    ctx_reads = unique(data.table::fread(ctx_file, skip=1, stringsAsFactors=F)[[1]]) 
+    ## update by reference
+    dat_all[read_type %in% ctx_reads,  read_type := sub("^C.._", "", stub)]
+  }  
+}
+
+read_types = unique(dat_all$read_type)
+
+```
+
+## Reference sequences from `r basename(ref_file)` 
+
+```{r ref}
+
+show(ref2)
+
+```
+
+Reference sequences are padded with Ns during mapping but these Ns are trimmed here. Not all differences are evident from starts and ends shown above. Below is a detail of positions 541 to 580 in select sequences. Sequence 4A161x55 differs from 4A161 *only* in the G>A difference at position 561 (G in 55th CpG), and is included as a decoy for reads that aren't caught by 4A166 or 10A176T, which differ from 4A161 at this site as well as a few other sites.
+
+```{r ref2, include=T}
+
+ref3 = DNAMultipleAlignment(subseq(ref2[3:6], 541, 580))
+
+show(ref3)
+
+# just for single seq
+# Views(ref2[[1]])
+
+# mal = DNAMultipleAlignment(ref2[3:6])
+# colmask(mal) = IRanges(start=1, end=500)
+# colmask(mal) = IRanges(start=601, end=ncol(mal))
+## view portal that keeps coordinates?
+# subseq(ref2[3:6], 530, 590)
+
+```
+
+```{r preptables}
+
+### statistics to collect for each ref seq 
+
+summary_u = data.table(ref_name=names(ref2), ## sort or not? 
+                       read_type="all",
+                       reads=0L,          ## changed from NA
+                       min=NA_real_,      ## start of quantiles
+                       pct03=NA_real_,
+                       pct05=NA_real_,
+                       pct10=NA_real_,
+                       Q1=NA_real_,
+                       Q2=NA_real_,
+                       Q3=NA_real_,
+                       pct90=NA_real_,
+                       pct95=NA_real_,
+                       max=NA_real_,      ## end of quantiles
+                       mean=NA_real_,
+                       e1.m1=NA_real_,    ## start of coef.wide
+                       e1.M1=NA_real_,
+                       e2.m1=NA_real_, 
+                       e2.M1=NA_real_, 
+                       e2.m2=NA_real_, 
+                       e2.M2=NA_real_,
+                       e3.m1=NA_real_, 
+                       e3.M1=NA_real_, 
+                       e3.m2=NA_real_, 
+                       e3.M2=NA_real_,
+                       e3.m3=NA_real_, 
+                       e3.M3=NA_real_,
+                       u2.m1=NA_real_, 
+                       u2.M1=NA_real_, 
+                       u2.w1=NA_real_, 
+                       u2.m2=NA_real_, 
+                       u2.M2=NA_real_,
+                       u2.w2=NA_real_, 
+                       u3.m1=NA_real_, 
+                       u3.M1=NA_real_, 
+                       u3.w1=NA_real_, 
+                       u3.m2=NA_real_, 
+                       u3.M2=NA_real_,
+                       u3.w2=NA_real_, 
+                       u3.m3=NA_real_, 
+                       u3.M3=NA_real_,
+                       u3.w3=NA_real_, 
+                       ex.m1=NA_real_, 
+                       ex.m2=NA_real_, 
+                       ex.p1=NA_real_,  
+                       ex.p2=NA_real_,  
+                       e1.dLLK=NA_real_,
+                       e2.dLLK=NA_real_,
+                       e3.dLLK=NA_real_,
+                       u2.dLLK=NA_real_,
+                       u3.dLLK=NA_real_,
+                       e1.dBIC=NA_real_,
+                       e2.dBIC=NA_real_,
+                       e3.dBIC=NA_real_,
+                       u2.dBIC=NA_real_,
+                       u3.dBIC=NA_real_ ## end of coef.summary
+)
+
+rownames(summary_u) = summary_u$ref_name; ## needed?
+
+## make deep copy so that updates by reference with := affect just one object
+summary_f = copy(summary_u)
+
+if (F) {  ## test deep copies
+  foo = data.table(x=1:10, y=LETTERS[1:10])
+  goo = foo
+  identical(foo, goo)
+  foo[,z:=x^2]
+  goo ## now goo also has z column!
+  goo[,z:=-x]
+  foo$z ## overwrites foo$x
+  
+  foo = data.table(x=1:10, y=LETTERS[1:10])
+  goo = copy(foo)
+  identical(foo, goo)
+  foo[,z:=x^2]
+  goo ## goo has no z
+  goo[,z:=-x]
+  foo$z ## does not overwrite foo$x
+  
+  foo = data.table(x=1:10, y=LETTERS[1:10])
+  goo = foo
+  identical(foo, goo)
+  goo$w =1  ## forces copy 
+  foo[,z:=x^2]
+  goo ## goo has no z
+  goo[,z:=-x]
+  foo$z ## does not overwrite foo$x
+  
+}
+
+summaries_u = list()
+summaries_f = list()
+
+for (rt in read_types) {
+  temp = copy(summary_f)
+  temp[,2] = rt
+  summaries_u[[rt]] = temp
+  summaries_f[[rt]] = temp
+}
+
+# Biostrings::pairwiseAlignment(ref2[[1]], ref2[[3]], type="local")
+## Local PairwiseAlignmentsSingleSubject (1 of 1)
+## pattern: [296] CCTGCAGCCTCCCAGCTGCCAGCGCGGAGCTCCTGG  ## of 331 <-- very end
+## subject: [538] CCTGCAGCCTCCCAGCTGCCAGCGCGGAGCTCCTGG  ## of 671
+# Biostrings::pairwiseAlignment(ref2[1], ref2[3], type="global")
+
+
+```
+
+## Bismark alignment report
+
+```{r ser, echo=F}
+
+run_sep = grep("Final Cytosine Methylation Report", run_info)
+
+if (has_ser) cat(run_info[seq(1, run_sep-1)], sep="\n")
+
+```
+
+## Bismark cytosine methylation report
+
+```{r ser2, echo=F}
+
+if (has_ser) cat(run_info[seq(run_sep, length(run_info))], sep="\n")
+
+```
+
+## Read counts per reference sequence
+
+```{r idx, echo=F}
+
+if (has_idx) kable(idx_info) 
+#if (has_idx) pander::pandoc.table(idx_info) 
+  
+```
+
+&nbsp;
+
+Note: length of ref seq includes 100 bp padding on each end
+
+## Reads per ref sequence after downsampling
+
+```{r summary1}
+
+## TODO: us keyby instead of by? or add [order(.,.,.),,]
+dat_agg = dat_all[, list(num_sites=.N, num_reads=sum(!duplicated(read_id))), 
+                  by=list(ref_name, read_type, read_orientation)]
+kable(dat_agg) 
+#pander::pandoc.table(dat_agg) 
+
+gc1 = gc()
+
+```
+
+&nbsp;
+
+In the remaining figures and tables, aligned reads were randomly downsampled to retain a maximum of 10000 reads per reference sequence. This can alter the proportions of reads to different reference sequences, but the table on the previous slide gives the counts before downsampling.
+
+## Counts of sites by methylation status
+
+```{r summary2}
+# .  :   for any bases not involving cytosines     
+
+dat_agg = dat_all[, list(num_sites=.N), by=list(ref_name, read_type, read_orientation, m_call)]
+dat_agg_2d = tidyr::pivot_wider(dat_agg, names_from=c(m_call), 
+                                values_from=num_sites, names_sort=T, values_fill=0)
+kable(dat_agg_2d) 
+cat("\n\n")
+gc2 = gc()
+
+```
+
+&nbsp;
+
+Abbreviations from BISMARK are listed below. In the plots, X and x are merged into H and h, respectively.
+
+```
+# X :      methylated C in CHG context                     
+# x :  not methylated C in CHG context                 
+# H :      methylated C in CHH context                     
+# h :  not methylated C in CHH context                 
+# Z :      methylated C in CpG context                     
+# z :  not methylated C in CpG context                 
+# U :      methylated C in Unknown context (CN or CHN)      
+# u :  not methylated C in Unknown context (CN or CHN) 
+```
+
+
+## Alignment plots
+
+* The following plots show alignments of randomly selected reads (up to a maximum of 100) mapping to each of the references sequences. 
+`r if (!show_missing) paste("* Reference sequences with zero reads are skipped ")`
+
+* Ref seqs are padded with Ns up to position 100 in these, and this is reflected in the coordinates, i.e., position 101 in the plots is the first base in the ref seq.   
+
+* Plots of the whole ref_sequence are shown (with most of the padding trimmed) as well as details of approx 60bp from near the 3' end. 
+* Unconverted references sequences are shown at the top but color-coding in the alignments are based on comparison to the *in silico* converted reference (all C to T). 
+
+* Matches are shown in grey, and mismatches are colored according to the read base:  A = light blue; T = dark blue; G = red; C = orange. Thus protected (methylated) Cs in CpGs will be colored orange, as will be unconverted Cs in CH contexts.  
+
+```{r bams, echo=F,  fig.width=9, fig.height=5, results="asis"}
+
+refBSS = ref
+for (k in 1:length(ref)) {
+  refBSS[[k]] = gsub("C","T", ref[[k]])
+}
+
+if (has_bam && show_bam) {
+  
+  for (alchrom in names(ref)) {
+    # cat("Alignments of up to 100 randomly-selected reads mapping to", alchrom, "\n\n")
+    ct = idx_info$count[idx_info$ref_seq==alchrom]
+    if (ct > 0) {
+      alfrom = npad - 15
+      alto  =  width(ref[alchrom])-npad + 15
+      
+      alfromZ = width(ref[alchrom]) - npad -140
+      if (alfromZ < 100) alfromZ = 100;
+      altoZ  =  alfromZ + 59
+      
+      options(ucscChromosomeNames=FALSE)
+      setrack  = SequenceTrack(ref, chromosome=alchrom)
+      setrackBSS  = SequenceTrack(refBSS, chromosome=alchrom)
+      getrack = GenomeAxisTrack(labelPos="above")
+      altrack = AlignmentsTrack(bam_file, chromosome=alchrom, 
+                                referenceSequence=setrackBSS, isPaired=F)
+      
+      cat("## Sample of alignments for", alchrom, "\n\n")
+      plotTracks(c(getrack, setrack, altrack), chromosome=alchrom, 
+                 from=alfrom, to=alto, margin=2, main=alchrom, cex.main=1)
+      cat("\n\n")
+      cat("## Sample of alignments for", alchrom, "(detail)\n\n")
+      plotTracks(c(getrack, setrack, altrack), chromosome=alchrom, 
+                 from=alfromZ, to=altoZ, margin=2, main=paste(alchrom, "(detail)"),
+                 cex.main=1)
+      cat("\n\n")
+    } else {
+      if (show_missing) {
+        cat("## Sample of alignments for", alchrom, "\n\n")
+        cat("(no reads)")
+        cat("\n\n")
+        cat("## Sample of alignments for", alchrom, "(detail)\n\n")
+        cat("(no reads)")
+        cat("\n\n")
+      }
+    }
+    
+  }
+}
+
+```
+
+
+```{r demix, include=T, results="asis", fig.width=10, fig.height=5} 
+
+## Computes approximate weighted quantiles, by replacing obs vector x with given 
+## weights by unweighted vector wx of length approx length len constructed either 
+## just by taking round(len*weight) replicates (method="round") or each obs, or by 
+## taking  floor(len*weight) replicates then adding 1 more at random with 
+## prob equal to fractional part of len*weight (method="quasi').
+## In both cases weights are first scaled to sum to 1. 
+## When weights are NULL, just computed ordinary quantiles on x rather than on xv 
+## --- results with equal weights may be different as amount of interpolation between 
+## points flanking cutoffs changes depending on len.
+## Note: the Hmisc package has a wtd.quantile function but it may not work as 
+## expected --- see thread at https://github.com/harrelfe/Hmisc/issues/9
+
+awQuantile = function(x, weights=NULL, probs=seq(0, 1, 0.25), len=1000000L, method="quasi") {
+  method = match.arg(method, c("quasi", "round"))
+  if (is.null(weights) || all(is.na(weights))) {
+    return(quantile(x, probs))
+  } else {
+    w = pmax(weights, 0)
+    w = w/sum(w, na.rm=T)
+    ne = len*w
+    if (method=="round") {
+      ni = round(ne)
+    } else { # method=="quasi" 
+      set.seed(2)
+      nf = floor(ne)
+      ni = nf + ifelse((ne - nf) < runif(length(ne)), 0, 1)
+    }
+    wx = rep(x, ni)
+    return(quantile(wx, probs))
+  } 
+} 
+
+if (F) { ## test 
+  awQuantile(x=c(1,2,3), weights=c(0.1, 0.2, 0.7), probs=c(0.09, 0.11, 0.29, 0.31, 0.5), method="quasi")
+  awQuantile(x=c(1,2,3), weights=c(0.1, 0.2, 0.7), probs=c(0.09, 0.11, 0.29, 0.31, 0.5), method="round")
+  awQuantile(x=c(1,2,3), weights=NULL, probs=c(0.09, 0.11, 0.29, 0.31, 0.5))
+  awQuantile(x=c(1,2,3), weights=c(1,1,1), probs=c(0.09, 0.11, 0.29, 0.31, 0.5))
+  ## two above are different, but interpolation may be less of an issue when there are many obs
+  awQuantile(x=1:1111, weights=NULL, probs=c(0.09, 0.11, 0.29, 0.31, 0.5))
+  awQuantile(x=1:1111,weights=rep(1,1111), probs=c(0.09, 0.11, 0.29, 0.31, 0.5))
+}
+
+
+## CHECK these:
+# install.packages("bbmle")
+# library(bbmle)
+# install.packages("emdbook")
+# library(emdbook)
+# https://cran.r-project.org/web/packages/dalmatian/vignettes/beta-binomial-1.html
+# https://www.rdocumentation.org/packages/VGAM/versions/1.1-6/topics/betabinomial
+# https://rdrr.io/cran/iZID/man/bb.mle.html
+
+# ## mean and variance of beta, not of beta-binomial! 
+# ab2mv = function(ab) {
+#   if (is.matrix(ab)) {
+#     a = ab[,1]
+#     b = ab[,2]
+#   } else {
+#     a = ab[1]; 
+#     b = ab[2]
+#   }
+#   m = a/(a+b)
+#   v = a*b/((a + b)^2*(a + b + 1))
+#   return(cbind(m,v))
+# }
+# ab2mv(c(1,9))
+# ab2mv(cbind(a=1:10, b=9*(1:10)))
+
+## theta*p = alpha
+## theta*(1-p) = beta
+## so theta = alpha + beta and p = alpha/(alpha + beta)?
+
+# dbetabinom(x=0:10, size=10, shape1=1, shape2=4)
+# dbetabinom(x=0:10, size=10, prob=1/5, theta=5)
+# dbetabinom(x=0:10, size=10, shape1=10, shape2=40)
+# dbetabinom(x=0:10, size=10, prob=1/5, theta=50)
+
+# https://en.wikipedia.org/wiki/Beta-binomial_distribution
+# method of moments
+## mean and variance of beta-binomial (count) -- 
+## need to divide m  by n, v by n^2, for success rate
+
+abn2mv = function(a,b,n) {
+  m = n*a/(a+b)
+  v = n*a*b*(a+b+n)/((a + b)^2*(a + b + 1))
+  return(c(m/n,v/n^2))
+}
+
+## as M->inf, goes to m*(1-m)/n = binom variance
+mMn2mv = function(m,M,n) {
+  v = m*(1-m)/n * (1+(n-1)/(M+1))
+  return(c(m,v))
+}
+
+# mMn2mv(0.2,10,1000)
+
+mvn2ab = function(m, v, n) {
+  # m = 0.1; v = 0.0109; n=30
+  if (m==0) return(c(0,10)) ## change 10?
+  if (m==1) return(c(1,10))
+  m1 = m*n
+  v1 = v*n^2  
+  binom.v = m*(1-m)*n
+  # m2 = e(x^2) + e(x)^2 
+  if (v1 <= binom.v) v1 = binom.v*1.01
+  m2 = v1 + m1^2  ## v = m2 - (m1)^2 
+  a = (n*m1 - m2)/(n*(m2/m1 - m1 - 1) + m1)
+  b = (n-m1)*(n - m2/m1)/(n*(m2/m1 - m1 -1) + m1)
+  a = max(a,0)
+  b = max(b,0) 
+  return(c(a,b))
+}
+
+# m=0.98; v=0.0004; n=25
+# m=1; v=0.000; n=25
+mvn2mM = function(m, v, n) {
+  # m = 0.1; v = 0.0109; n=30
+  if (m==0) return(c(0,10)) ## change 10?
+  if (m==1) return(c(1,10))
+  m1 = m*n
+  v1 = v*n^2 
+  binom.v = m*(1-m)*n
+  # m2 = e(x^2) + e(x)^2 
+  if (v1 <= binom.v) v1 = binom.v*1.01
+  m2 = v1 + m1^2  ## v = m2 - (m1)^2 
+  a = (n*m1 - m2)/(n*(m2/m1 - m1 - 1) + m1)
+  b = (n-m1)*(n - m2/m1)/(n*(m2/m1 - m1 -1) + m1)
+  a = max(a,0)
+  b = max(b,0) 
+  M = max(a + b, 0.01)
+  return(c(m,M))
+}
+
+# abn2mv(1,9,30)
+## 0.10000000 0.01090909
+# mvn2ab(0.1, 0.010909, 30)
+## 1.000013 9.000114
+
+## x has two columns, neg and pos counts -- reparameterize by m = a/(a+b) and M = a+b
+## start = start2b; beta=2
+## mm_start: use method of moments to initialize starting parameters m_i and M_i (but not weights w_i),
+##   based on dividing reads into equally-sized groups after sorting from low to high mean
+## binom=T for simple (non-beta) binomial, equiv to M=Inf
+demixBB = function(cts, n_comp=2, start=NULL, mm_start=F, binom=F, bound=F, fit_w=F) { 
+  
+  if (!n_comp %in% 1:4) stop("only n_comp in 1:4 are implemented")
+  x = data.table(cts)
+  x[, tot := (x[,1]+ x[,2])]
+  x[, frac := x[,1]/(x[,1]+ x[,2])]
+  x[, rank := rank(frac, ties.method = "first")]
+  if (n_comp > 1) {
+    x[, cut := cut(rank, n_comp, labels=letters[seq_len(n_comp)])]
+  } else {
+    x[, cut := letters[seq_len(n_comp)]]
+  }
+ 
+  if (mm_start) {
+    init = x[ ,. (num=.N, mean=mean(frac), var=var(frac), n=max(tot)), keyby=cut]
+    if (nrow(init) < n_comp) {  ## can happen if nrow(cts) < n_comp
+      ## repeat rows as needed
+      rrr = sort(rep(seq_len(nrow(init)),length=n_comp))
+      init = init[rrr,]
+    }
+    init[is.na(var), var:=0] 
+    # var will get boosted in mvn2mM
+    init[mean > 0.99, mean:=0.99]
+    init[mean < 0.01, mean:=0.01]
+    
+    ## skip (a,b) and go directly to m=a/(a+b), M=a+b?
+    params = sapply(1:nrow(init), FUN=function(k) mvn2mM(init$mean[k], init$var[k], init$n[k]))
+    ip = c(params)  ## m1, M1, m2, M2, ....
+    names(ip) = c("m1", "M1", "m2", "M2", "m3", "M3", "m4", "M4")[seq_along(ip)]
+    if (!all(names(ip) %in% names(start))) stop("some mm param names not found")
+    start[names(ip)] = ip
+    warning(toString(start))
+  }
+  
+  # mmllkv = function(pvec=c(1/2,2)){ 
+  #   kk = length(pvec)/2
+  #   dmat = matrix(NA,  nrow=nrow(x), ncol=kk)
+  #   for (k in 1:kk) {
+  #     dmat[,k] = dbetabinom(x=x$Z, size=x$tot, prob=pvec[2*k-1], theta=pvec[2*k])
+  #   } 
+  #   llk = sum(log(rowSums(dmat))) # allow unequal prior?
+  #   return(-llk)
+  # }
+  # 
+  # dbetabinom2 = function(theta, ...) {
+  #   if (is.finite(theta)) return(dbetabinom(theta=theta, ...)) else return(dbinom(...))
+  # }
+  
+  mmllk1 = function(m1=1/2,M1=2,w1=1){ 
+    pvec = c(m1,M1)
+    Wvec = exp(w1)
+    Wvec = Wvec/sum(Wvec)
+    kk = length(pvec)/2
+    dmat = matrix(NA,  nrow=nrow(x), ncol=kk)
+    for (k in 1:kk) {
+      if (is.finite(pvec[2*k])) {
+        dmat[,k] = dbetabinom(x=x$Z, size=x$tot, prob=pvec[2*k-1], theta=pvec[2*k])
+      } else {
+        dmat[,k] = dbinom(x=x$Z, size=x$tot, prob=pvec[2*k-1])
+      }
+    } 
+    llk = sum(log(rowSums(sweep(dmat, 2, Wvec, "*")))) # wvec allows unequal prior
+    return(-llk)
+  }
+  
+  mmllk2 = function(m1=1/3,M1=2,m2=2/3,M2=2, w1=1/2, w2=1/2){ 
+    pvec = c(m1,M1,m2,M2)
+    Wvec = exp(c(w1,w2)) 
+    Wvec = Wvec/sum(Wvec)
+    # pvec = c(0.84,4.74,1,100)
+    kk = length(pvec)/2
+    dmat = matrix(NA,  nrow=nrow(x), ncol=kk)
+    for (k in 1:kk) {
+      if (is.finite(pvec[2*k])) {
+        dmat[,k] = dbetabinom(x=x$Z, size=x$tot, prob=pvec[2*k-1], theta=pvec[2*k])
+      } else {
+        dmat[,k] = dbinom(x=x$Z, size=x$tot, prob=pvec[2*k-1])
+      }
+    }
+    llk = sum(log(rowSums(sweep(dmat, 2, Wvec, "*")))) # wvec allows unequal prior
+    return(-llk)
+  }
+  
+  mmllk3 = function(m1=1/4,M1=2,m2=2/4,M2=2,m3=3/4,M3=2,w1=1/3,w2=1/3,w3=1/3){ 
+    pvec = c(m1,M1,m2,M2,m3,M3)
+    Wvec = exp(c(w1,w2,w3)) 
+    Wvec = Wvec/sum(Wvec)
+    kk = length(pvec)/2
+    dmat = matrix(NA,  nrow=nrow(x), ncol=kk)
+    for (k in 1:kk) {
+      if (is.finite(pvec[2*k])) {
+        dmat[,k] = dbetabinom(x=x$Z, size=x$tot, prob=pvec[2*k-1], theta=pvec[2*k])
+      } else {
+        dmat[,k] = dbinom(x=x$Z, size=x$tot, prob=pvec[2*k-1])
+      }
+    } 
+    llk = sum(log(rowSums(sweep(dmat, 2, Wvec, "*")))) # wvec allows unequal prior
+    return(-llk)
+  }
+  
+  mmllk4 = function(m1=1/5,M1=2,m2=2/5,M2=2,m3=3/5,M3=2,m4=4/5,M4=2,w1=1/4,w2=1/4,w3=1/4,w4=1/4){ 
+    pvec = c(m1,M1,m2,M2,m3,M3,m4,M4) 
+    Wvec = exp(c(w1,w2,w3,w4))
+    Wvec = Wvec/sum(Wvec)
+    kk = length(pvec)/2
+    dmat = matrix(NA,  nrow=nrow(x), ncol=kk)
+    for (k in 1:kk) {
+      if (is.finite(pvec[2*k])) {
+        dmat[,k] = dbetabinom(x=x$Z, size=x$tot, prob=pvec[2*k-1], theta=pvec[2*k])
+      } else {
+        dmat[,k] = dbinom(x=x$Z, size=x$tot, prob=pvec[2*k-1])
+      }
+    } 
+    llk = sum(log(rowSums(sweep(dmat, 2, Wvec, "*")))) # wvec allows unequal prior
+    return(-llk)
+  }
+  
+  ## merge with of mmllk1..4? 
+  mmllkp = function(coefs){ 
+    
+    mM.coefs = c("m1", "M1", "m2", "M2", "m3", "M3", "m4", "M4")
+    w.coefs = c("w1", "w2", "w3", "w4")
+    
+    pvec = coefs[names(coefs) %in% mM.coefs]
+    if (!identical(names(pvec), mM.coefs[seq_along(pvec)])) stop("check pvec")
+    kk = length(pvec)/2
+    wvec = coefs[names(coefs) %in% w.coefs]
+    ## can make wvec uniform if missing entirely
+    if (length(wvec)==0) {wvec = rep(1, kk); names(wvec) = paste0("w", seq_len(kk))}
+    if (length(wvec)!=kk  || !identical(names(wvec), w.coefs[seq_len(kk)])) stop("check ww")
+    
+    Wvec = exp(wvec)/sum(exp(wvec))
+    dmat = matrix(NA,  nrow=nrow(x), ncol=kk)
+    for (k in 1:kk) {
+      if (is.finite(pvec[2*k])) {
+        dmat[,k] = dbetabinom(x=x$Z, size=x$tot, prob=pvec[2*k-1], theta=pvec[2*k])
+      } else {
+        dmat[,k] = dbinom(x=x$Z, size=x$tot, prob=pvec[2*k-1])
+      }
+    } 
+    
+    dmat2 = sweep(dmat, 2, Wvec, "*")
+    pmat = sweep(dmat2, 1, rowSums(dmat2), "/")
+    colnames(pmat) = paste0("ppc", 1:kk)
+    return(pmat)
+  }
+  
+  ## What abbout vecpar instead of individual params?
+  # parnames(mmllkv)=c("m1","M1)
+  # bbmle::mle2(mmllkv, vecpar=T)
+  eee = 0.001
+  
+  mmllk = switch(n_comp, mmllk1, mmllk2, mmllk3, mmllk4)
+  ## could instead fit vi = exp(wi) with vi between 0 and 1
+  lb = c(m1=eee, M1=eee, m2=eee, M2=eee, m3=eee, M3=eee, m4=eee, M4=eee, w1=-Inf, w2=-Inf, w3=-Inf, w4=-Inf)
+  ub = c(m1=1-eee, M1=Inf, m2=1-eee, M2=Inf, m3=1-eee, M3=Inf, m4=1-eee, w1=Inf, w2=Inf, w3=Inf, w4=Inf)
+
+  ## need hessian for profile
+  if (is.null(start)) {
+    ## FIXME:
+    stop("needs to be updated")
+    # fit = bbmle::mle2(mmllk, data=x, skip.hessian=F)
+  } else {
+    
+    fix.me = c()
+    
+    if (binom==T)  fix.me = c(fix.me, start[intersect(c("M1","M2","M3","M4"), names(start))])
+    if (fit_w==F) fix.me = c(fix.me, start[intersect(c("w1","w2","w3","w4"), names(start))])
+    non.fixed = setdiff(names(start), names(fix.me))
+    if (!all(non.fixed %in% names(lb))) stop("param name not found in lb")
+    if (!all(non.fixed %in% names(ub))) stop("param name not found in ub")
+
+    lb = lb[non.fixed]
+    ub = ub[non.fixed]
+    
+    if (bound==T) {
+      fit = bbmle::mle2(mmllk, start=start, data=x, skip.hessian=F, fixed=fix.me, 
+                        method="L-BFGS-B", lower=lb, upper=ub)
+    } else { 
+      fit = bbmle::mle2(mmllk, start=start, data=x, skip.hessian=F, fixed=fix.me)
+    }
+    
+  }
+  cf = coef(fit)
+  
+  cf.m = cf[c("m1", "m2", "m3", "m4")]
+  cf.M = cf[c("M1", "M2", "M3", "M4")]
+  cf.w = cf[c("w1", "w2", "w3", "w4")]
+  cf.perm = order(cf.m, cf.M, cf.w) ## some may be NA, but those should come last
+  cf.perm = cf.perm[seq_len(sum(!is.na(cf.m)))]
+  
+  post =  mmllkp(cf) 
+  return(list(fit=fit, post=post, perm=cf.perm))
+}
+
+######################################
+
+fitMixture = function(cts, profile=F, bound=F, vary_w=T) {
+ 
+  stM = 2 ## starting value of M1, M2, M3
+  
+  start1i =  list(m1=1/2, M1=stM, w1=1)                ## i = identical
+  start1ib = list(m1=1/2, M1=Inf, w1=1)                ## b = binomial (ib = ub for 1 comp)
+  start2i =  list(m1=1/2, M1=stM, m2=1/2, M2=stM, w1=1, w2=1)      ## i = identical
+  start2ub = list(m1=1/3, M1=Inf, m2=2/3, M2=Inf, w1=1, w2=1)      ## ub = uniformly spaced, binomial
+  # start2b = list(m1=1/2, M1=Inf, m2=1/2, M2=Inf)     ## sometimes m1=m2 even after fitting? need to break symmetry?
+  start2x =  list(m1=0,   M1=stM, m2=1,  M2=stM, w1=1, w2=1)       ## x = at boundaries, for testing error-handling
+  start2u =  list(m1=1/3, M1=stM, m2=2/3, M2=stM, w1=1, w2=1)      ## u = uniformly spaced
+  start3i =  list(m1=1/2, M1=stM, m2=1/2, M2=stM, m3=1/2, M3=stM, w1=1, w2=1, w3=1)  ## i = identical
+  start3ub = list(m1=1/4, M1=Inf, m2=1/2, M2=Inf, m3=3/4, M3=Inf, w1=1, w2=1, w3=1)  ## ub = uniformly spaced, binomial
+  start3u =  list(m1=1/4, M1=stM, m2=1/2, M2=stM, m3=3/4, M3=stM, w1=1, w2=1, w3=1)  ## u = uniformly spaced
+  
+  ## fit.list = list() --- make list to simplify?
+  # fitErr = function(cond) {print("opt error"); return(NA)}
+  # tryCatch(fit3m <- demixBB(cts, n_comp=3, start=start3i, mm_start=T), error=fitErr)
+  # Error in optim(par = c(m1 = 0.571645695776755, M1 = 30.382537974291, m2 = 0.910905960241345,  : 
+  # non-finite finite-difference value [5]
+  ## TODO: use constrained optimizer?
+
+  fit.list = list()
+  
+  ## check beta=T!!
+  # n_comp=1; start=start1ib; beta=T; bound=F; fit_w=F
+  
+  suppressWarnings({
+    fit.list[["b1i"]] = try(demixBB(cts, n_comp=1, start=start1ib, binom=T, bound=bound), silent=T)
+    fit.list[["e1i"]] = try(demixBB(cts, n_comp=1, start=start1i, bound=bound), silent=T)
+    fit.list[["e1c"]] = try(demixBB(cts, n_comp=1, start=start1i, bound=T), silent=T)
+    fit.list[["e1m"]] = try(demixBB(cts, n_comp=1, start=start1i, mm_start=T, bound=bound), silent=T)
+    # fit.list[["e2z"]] = try(demixBB(cts, n_comp=2, start=start2z), silent=T)
+    fit.list[["b2u"]] = try(demixBB(cts, n_comp=2, start=start2ub, binom=T, bound=bound), silent=T)
+    fit.list[["e2c"]] = try(demixBB(cts, n_comp=2, start=start2u, bound=T), silent=T)
+    fit.list[["e2u"]] = try(demixBB(cts, n_comp=2, start=start2u, bound=bound), silent=T)
+    fit.list[["e2i"]] = try(demixBB(cts, n_comp=2, start=start2i, bound=bound), silent=T)
+    fit.list[["e2m"]] = try(demixBB(cts, n_comp=2, start=start2i, mm_start=T, bound=bound), silent=T)
+    fit.list[["e3i"]] = try(demixBB(cts, n_comp=3, start=start3i, bound=bound), silent=T)
+    #fit.list[["e3c"]] = try(demixB(cts, n_comp=3, start=start3i, bound=T), silent=T) ## skip?
+    fit.list[["e3u"]] = try(demixBB(cts, n_comp=3, start=start3u, bound=bound), silent=T)
+    fit.list[["e3m"]] = try(demixBB(cts, n_comp=3, start=start3i, bound=bound, mm_start=T), silent=T)
+    
+    if (vary_w) {
+      # fit.list[["v2u"]] = try(demixBB(cts, n_comp=2, start=start2ub, binom=T, bound=bound, fit_w=T), silent=T)
+      fit.list[["u2c"]] = try(demixBB(cts, n_comp=2, start=start2u, bound=T, fit_w=T), silent=T)
+      fit.list[["u2u"]] = try(demixBB(cts, n_comp=2, start=start2u, bound=bound, fit_w=T), silent=T)
+      fit.list[["u2i"]] = try(demixBB(cts, n_comp=2, start=start2i, bound=bound, fit_w=T), silent=T)
+      fit.list[["u2m"]] = try(demixBB(cts, n_comp=2, start=start2i, mm_start=T, bound=bound, fit_w=T), silent=T)
+      fit.list[["u3i"]] = try(demixBB(cts, n_comp=3, start=start3i, bound=bound, fit_w=T), silent=T)
+      #fit.list[["u3c"]] = try(demixBB(cts, n_comp=3, start=start3i, bound=T, fit_w=T), silent=T)  ##  ## skip?
+      fit.list[["u3u"]] = try(demixBB(cts, n_comp=3, start=start3u, bound=bound, fit_w=T), silent=T)
+      fit.list[["u3m"]] = try(demixBB(cts, n_comp=3, start=start3i, bound=bound, mm_start=T, fit_w=T), silent=T)
+    }
+  })
+ 
+  ## isa function not until R v4? could also do inherits(x, "try-error")
+  fit.drop = sapply(fit.list, FUN=function(x) is(x, "try-error")) 
+  
+  if (any(fit.drop)) {
+    fit.warnings = paste("dropping fits", toString(names(fit.drop)[fit.drop==T]))
+    warning(fit.warnings)
+    #fit.list[fit.drop] = NULL
+    fit.list = fit.list[fit.drop==F]
+  } else {
+    fit.warnings = NULL
+  }
+
+  # (summary(fit2$fit))@coef
+  #   if (missing(std.err)) {
+  #       std.err <- summ@coef[, "Std. Error"]
+  #   } else {
+  # fit3$fit@details$hessian
+  
+  ## fit.list[[i]]  has fit, post and perm
+  
+  max_c = 3 
+  coef.names = c(outer(c("m","M","w"), seq_len(max_c), FUN=paste0))
+  ppc.names = paste0("ppc", seq_len(max_c))
+ 
+  for (k in seq_along(fit.list)){  ## sort mixture components by means m_i
+    perm = fit.list[[k]]$perm
+    if (length(perm) > max_c) stop("unexpected perm length")
+    perm = perm[seq_len(max_c)] ## may pad end with NAs
+    fit.list[[k]]$post.sorted = fit.list[[k]]$post[, perm, drop=F]
+    colnames(fit.list[[k]]$post.sorted) =  ppc.names
+    coef.old = coef(fit.list[[k]]$fit)[coef.names] ## reorder and expand
+    coef.new = coef.old
+    for (pattern in c("^m","^M","^w")) {
+      dex = grep(pattern, coef.names)
+      coef.new[dex]  = coef.old[dex][perm]
+    }
+    names(coef.new) = coef.names
+    fit.list[[k]]$coef.sorted = coef.new
+  }
+  
+  fit.fits = lapply(fit.list, FUN=function(x) x$fit) ## has orig coefs
+  fit.post.means = lapply(fit.list, FUN=function(x) colMeans(x$post.sorted, na.rm=T))
+  fit.coefs = lapply(fit.list, FUN=function(x) x$coef.sorted)
+
+  post.mat = do.call(rbind, fit.post.means)
+  post.mat = data.table(k = as.integer(substr(rownames(post.mat),2,2)), 
+                        mod = substr(rownames(post.mat),1,2), 
+                        fit = rownames(post.mat), post.mat)
+  
+  coef.mat = do.call(rbind, fit.coefs)
+  w.col= grep("^w\\d+$", colnames(coef.mat)) 
+  W.mat = exp(coef.mat[, w.col]) ## weights are unnormalized and on log scale
+  W.mat = sweep(W.mat, 1, rowSums(W.mat, na.rm=T), "/")
+  coef.mat[, w.col] = W.mat
+  coef.mat = data.table(k = as.integer(substr(rownames(coef.mat),2,2)), 
+                        mod = substr(rownames(coef.mat),1,2),      
+                        fit = rownames(coef.mat), coef.mat)
+  
+  coef.mat[, cf := sapply(fit.fits, FUN=function(x) x@details$convergence)]  # 0 = yes
+  coef.mat[, LLK := sapply(fit.fits, logLik)]
+  coef.mat[, dLLK := LLK -  max(LLK, na.rm=T)]
+  coef.mat[, BIC := sapply(fit.fits, BIC)]
+  coef.mat[, dBIC := BIC - min(BIC, na.rm=T)]
+  coef.mat[, AICc := sapply(fit.fits, AICc)]
+  coef.mat[, dAICc := AICc - min(AICc, na.rm=T)]
+  coef.mat[, use := F] ## will update later
+  coef.mat[, adjW := grepl("^u|^v", fit)] 
+  
+  # don't use any models for binomial fits; for other models use fit with largest LLK
+  coef.mat[grepl("^e|^u", fit), use := rank(-LLK, ties="first") == 1, by=mod]  # by=list(adjW, k)
+  
+  ## weight as in ICtab.  CHECK: base of log, factor of 2
+  coef.mat[use==T & adjW==F & !is.na(dBIC)  & k <= 3, pBIC.3  := exp(-dBIC/2)/sum(exp(-dBIC/2))]
+  coef.mat[use==T & adjW==F & !is.na(dBIC)  & k <= 2, pBIC    := exp(-dBIC/2)/sum(exp(-dBIC/2))]
+  coef.mat[use==T & adjW==F & !is.na(dAICc) & k <= 3, pAICc.3 := exp(-dAICc/2)/sum(exp(-dAICc/2))]
+  coef.mat[use==T & adjW==F & !is.na(dAICc) & k <= 2, pAICc   := exp(-dAICc/2)/sum(exp(-dAICc/2))]
+  ## can use these for model averaging later...
+  
+  fits.use = fit.fits[which(coef.mat$use==T)]
+  names(fits.use) =  substr(names(fits.use), 1,2)
+  fits.use.e = fits.use[grep("^e", names(fits.use))]
+  
+  BICt =  BICtab(fits.use.e, delta=T, weights=T, sort=F, nobs=nrow(cts), mnames=names(fits.use.e))
+  BICtw = BICtab(fits.use,   delta=T, weights=T, sort=F, nobs=nrow(cts), mnames=names(fits.use))
+ 
+  ## TODO: problem if fit e3 is worse? just use BIC? 
+  ## Also, check if non-convergence causes any problems
+  # a123 =  do.call(anova, fits.use) ## 
+  ## error: no applicable method for 'anova' applied to an object of class "mle2"
+  # a123 =  do.call(anova, unname(fits.use)) ## hangs
+  # anova(fits.use[[1]], fits.use[[2]], fits.use[[2]])
+  ## pval is rel to previous model 
+  
+  if (all(c("e1","e2","e3") %in% names(fits.use))) {
+    a123 = anova(fits.use[["e1"]], fits.use[["e2"]], fits.use[["e3"]])
+  } else if (all(c("e1","e2") %in% names(fits.use))) {
+    a123 = anova(fits.use[["e1"]], fits.use[["e2"]])
+  } else {
+    a123 = NA
+  }
+  
+  if (all(c("e1","e2","e3","u2","u3") %in% names(fits.use))) { 
+    ## chains nested models 
+    a1245 = anova(fits.use[["e1"]], fits.use[["e2"]], fits.use[["u2"]], fits.use[["u3"]])
+    a1235 = anova(fits.use[["e1"]], fits.use[["e2"]], fits.use[["e3"]], fits.use[["u3"]])
+  } else if (all(c("e1","e2","u2") %in% names(fits.use))) { 
+    a1245 = anova(fits.use[["e1"]], fits.use[["e2"]], fits.use[["u2"]])
+    a1235 = NA
+  } else {
+    a1245 = NA
+    a1235 = NA
+  }
+
+  fit.list.use = fit.list[coef.mat$use==T]
+  names(fit.list.use) = substr(names(fit.list.use),1,2)
+ 
+  if ("e2" %in% names(fit.list.use)) {
+    post2 = fit.list.use[["e2"]]$post.sorted[,1:2]
+    colnames(post2) = paste0(colnames(post2), "_2")
+  } else post2 = NULL
+  
+  if ("e3" %in% names(fit.list.use)) {
+    post3 = fit.list.use[["e3"]]$post.sorted[,1:3]
+    colnames(post3) = paste0(colnames(post3), "_3")
+  } else post3 = NULL
+  
+  if ("u2" %in% names(fit.list.use)) {
+    post2w = fit.list.use[["u2"]]$post.sorted[,1:2]
+    colnames(post2w) = paste0(colnames(post2w), "_2w")
+  } else post2w = NULL
+  
+  if ("u3" %in% names(fit.list.use)) {
+    post3w = fit.list.use[["u3"]]$post.sorted[,1:3]
+    colnames(post3w) = paste0(colnames(post3w), "_3w")
+  } else post3w = NULL
+  
+  return(list(fits=fits.use, BIC=BICt, BICw=BICtw, 
+              anova123=a123, anova1235=a1235, anova1245=a1245,  
+              post2=post2, post3=post3, post2w=post2w, post3w=post3w, 
+              post.mat=post.mat, coef.mat=coef.mat, fit.warnings=fit.warnings))
+}
+
+## fm1 = fitMixture(cts, bound=F) 
+
+if (F) {  ## test fitMixtures
+  
+  # set.seed(5)
+  # for (k in c(0.1,1,10,100,1000,10000)) {
+  #   ka = k
+  #   kb = 9*k
+  #   rb = rbeta(10000,ka, kb)
+  #   bm = ka/(ka+kb)
+  #   bv = ka*kb/((ka + kb)^2*(ka + kb + 1))
+  #   cat("beta params: a =", ka, "; b =", kb, "; mean =", bm, "; sd =", sqrt(bv),"\n")
+  #   cat("observed: mean =", mean(rb), "; sd =", sd(rb), "\n")
+  # }
+  
+  set.seed(5)
+  nsamp = 400
+  grp = ifelse(1:nsamp <= nsamp/2, "A","B")
+  nobs = 50 - sample(0:10, nsamp, replace=T)
+  prob1 = rbeta(nsamp, 1,9)
+  prob2 = rbeta(nsamp, 1,4)
+  prob12 = ifelse(grp=="A",prob1,prob2)
+  x = data.frame(z=rbinom(nsamp, size=nobs, p=prob12), Z=NA, grp=grp)
+  x$Z = nobs - x$z
+  x$frac = x$z/(x$z+x$Z)
+  x$rank = rank(x$frac)
+  # ggplot(x, aes(x=1:nrow(x), y=frac,col=grp)) + geom_point()
+  # ggplot(x, aes(x=rank, y=frac,col=grp)) + geom_point() + facet_wrap(~grp)
+  x$d1 = dbetabinom(x=x$Z, size=x$z+x$Z, shape1=1, shape2=9)
+  x$d2 = dbetabinom(x=x$Z, size=x$z+x$Z, shape1=1, shape2=4)
+  # ggplot(x, aes(x=1:nrow(x), y=d1)) + geom_point() + 
+  #  geom_point(aes(y=d2), col="red")
+  # ggplot(x, aes(x=frac, y=d1, col=grp)) + geom_point(shape=1, alpha=0.5) + 
+  #  geom_point(aes(y=d2), shape=4) + facet_wrap(~grp)
+  # table(x$grp)
+  cts = x
+  fm = fitMixture(cts)
+  cts = data.table(cbind(cts, fm$post2, fm$post3))
+  ## etc --- see code later
+}
+
+
+## From https://search.r-project.org/CRAN/refmans/bbmle/html/mle2.html:
+# x <- 0:10
+# y <- c(26, 17, 13, 12, 20, 5, 9, 8, 5, 4, 8)
+# d <- data.frame(x,y)
+# 
+# ## in general it is best practice to use the `data' argument,
+# ##  but variables can also be drawn from the global environment
+# LL <- function(ymax=15, xhalf=6)
+#     -sum(stats::dpois(y, lambda=ymax/(1+x/xhalf), log=TRUE))
+# ## uses default parameters of LL
+# (fit <- mle2(LL))
+
+if (F) {
+  
+  set.seed(1001)
+  x1 <- rbetabinom(n=10,prob=0.1,size=50,theta=10)
+  mtmp <- function(prob,size,theta) {
+    -sum(dbetabinom(x1,prob,size,theta,log=TRUE))
+  }
+  suppressWarnings(
+    m0 <- mle2(mtmp,start=list(prob=0.2,theta=9),data=list(size=50))
+  )
+  summary(m0)
+  suppressWarnings(p0 <- profile(m0))
+  summary(m0)
+  par(mfrow=c(1,2))
+  ## locally linear rather than quadratic  
+  ## signed squareroot, so x -> x^2 -> x
+  plot(p0,plot.confstr=TRUE)  
+  plot(p0, absVal=F)
+  # x=-10:10; y=x^2; plot(x,y)
+  # x=-10:10; y=x^2; plot(x,sqrt(y))
+}
+
+# knitr::knit_exit()
+```
+
+## Plots for each reference sequence
+
+Filtered plots exclude reads that satisfy any of the conditions below:
+
+* have methylation call (Z or z) in fewer than `r paste0(min_frac_CG_called*100, "%")` of CpG contexts in defined range
+* have more than `r paste0(max_frac_nonconvert*100, "%")` non-converted Cs in CH contexts
+* match already-included read at all C positions (CpG and CH contexts)
+
+```{r refs, fig.width=10.5, fig.height=5.0, results="asis", warning=F, message=F}
+
+## Use Clumpy for de-duping unaligned fastq? https://www.biostars.org/p/225338/
+## keep order from ref?
+
+observed_refs = unique(dat_all$ref_name)
+observed_refs = observed_refs[order(match(observed_refs, names(ref)))]
+
+mat.list = list() ## all CpGs in all reads
+cts.list = list() ## CpG count per reads, and posterior of read being from each allele
+bbm.list = list() ## beta binomial fit summaries
+qnt.list = list() ## quantiles, including estimated allele-specific quantiles 
+
+
+## TODO: option to include slides even if no reads?
+for (rname in observed_refs) {
+# for (rname in c("4A161", "4A_4B168","4A_10A","4A_AL", "BSSX")[1]) {
+
+  refseq = as.character(ref[[rname]])
+  cpg.ref = as.integer(gregexpr("CG", refseq, ignore.case=T)[[1]])
+  c.all = as.integer(gregexpr("C", refseq, ignore.case=T)[[1]])
+  c.drop = as.integer(gregexpr("CN|C$|C.$", refseq, ignore.case=T)[[1]])
+  c.ref = setdiff(c.all, c.drop)
+  cph.ref = setdiff(c.ref, cpg.ref)
+  # drop last site?
+  
+  if (rname %in% names(cpg_ranges)) {  
+    cpg.range = cpg_ranges[[rname]]
+  } else {
+    cpg.range = c(1, Inf)
+  }
+  
+  cpg.range[1] = max(cpg.range[1], 1)
+  cpg.range[2] = min(cpg.range[2], length(cpg.ref))
+  
+  cpg.ref.f = cpg.ref[seq(cpg.range[1],  cpg.range[2])]
+  
+  ref_dex = which(dat_all$ref_name==rname)
+  cxx.bismark = dat_all[ref_name==rname, sort(unique(position))]; 
+  read_names = unique(dat_all$read_id[ref_dex])
+  
+  gc3 = gc()
+  
+  if (length(read_names) > max_reads) {
+    set.seed(7)
+    warning(paste0(rname, ": keeping random ", as.integer(max_reads), " of ", length(read_names), " reads"))
+    keep_names = sample(read_names, max_reads) 
+    ## 2nd should be automatic, if no multimappers
+    datx = dat_all[(read_id %in% keep_names) & ref_name==rname, ]
+  } else {
+    datx = dat_all[ref_dex,]
+  }
+  gc4 = gc()
+  # format(object.size(datx), units="MB")    ## ~600 Mb
+  
+  # datx$m_call[datx$m_call=="x"] = "h"
+  # datx$m_call[datx$m_call=="X"] = "H"
+  ## update by reference instead:
+  datx[m_call=="x", m_call:="h"] 
+  datx[m_call=="X", m_call:="H"] 
+  
+  ## is is strictly necessary to make matrix? 
+  ## useful for finding duplicates, maybe?
+  ## make a sparse matrix? --- probably not worth it
+  ## change storage from char to int?
+  mat = reshape2::dcast(datx, read_id ~ position, value.var="m_call")
+  rownames(mat) = mat$read_id ## makenames()?
+  mat = mat[,-1]
+  # dim(mat)  
+  #format(object.size(mat), units="MB")    ## ~140 Mb
+  
+  #numGoodR = rowSums(!is.na(mat))
+  #summary(numGoodR) 
+  #numGoodC = colSums(!is.na(mat)) 
+  #summary(numGoodC)
+  
+  ## NA treated like any other entry, both for vector and matrix
+  # duplicated(c(1,2,2,NA,NA))
+  ## duplicated(rbind(c(1,2), c(1,3), c(1,3), c(NA,3), c(NA,3), c(NA,NA)))
+  is.dup = duplicated(mat) 
+  datx[, dup := (read_id %in% rownames(mat)[is.dup])]
+  # table(datx$dup)
+  rm(mat)
+  gc5 = gc()
+  
+  ## exact dups. version without NAs? or cutoff on hamming dist?
+  #apply(mat, 2, table) ## a lot of mixed sites, but usually 1 dominant
+  
+  ### make this optional?
+  # if (sum(is.dup)>0) {
+  #  warning(paste0(rname, ": dropping duplicates (", sum(is.dup) , " of ",nrow(mat),")"))
+  #  mat = mat[!is.dup, , drop=F]
+  #  ## keep IDs, ref back to datx?
+  #}
+  
+  # context = apply(mat, 2, FUN=function(x) table(factor(toupper(x), levels=c("H", "X", "Z")))
+  # CG.dex1 = which(context["Z",] > 5 & context["Z",] >= 0.8*colSums(context)) 
+  # CG.dex2 = which(context["Z",] > 1 & context["Z",] >= 0.6*colSums(context)) 
+  
+  ## include cph range as well?
+  
+  ### identical, if just ACGTN?
+  # setdiff(cxx.bismark, c.ref)
+  # setdiff(c.ref, cxx.bismark)
+  ############################
+  
+  # table(cpg.ref %in% cxx.bismark)
+  #  227 234 242 never observed?
+  
+  cpg.missed = setdiff(cpg.ref, cxx.bismark)
+  
+  if (length(cpg.missed)>0) {
+    warning(paste0("missed cpgs for ", rname, ": ", paste(cpg.missed, collapse=",")))
+    ## relabel based on all coords? Relabel based on index in c.ref
+  }
+  
+  c.gained = setdiff(cxx.bismark, c.ref)
+  
+  if (length(c.gained)>0) {
+    warning(paste0("gained c for ", rname, ": ", paste(c.gained, collapse=",")))
+    ## relabel based on all coords? Relabel based on index in c.ref
+  }
+  
+  ################# not used ############### 
+  # CG.dex = which(cxx.bismark %in% cpg.ref)
+  # CH.dex = which(!(cxx.bismark %in% cpg.ref))
+  ########################################## 
+
+  ## keep as integers for now?
+  # as.numeric(as.factor(2:7))  ## 1:6
+  # as.numeric(as.character(as.factor(2:7))) ## 2:7
+  ## TODO: simplify?
+  datx[, CpG := factor(match(position, cpg.ref), levels=1:length(cpg.ref))]
+  datx[, CH := factor(match(position, cph.ref), levels=1:length(cph.ref))]
+  datx[, C := factor(match(position, c.ref), levels=1:length(c.ref))]
+  datx[, context := ifelse(!is.na(CpG), "CpG", ifelse(!is.na(CH), "CH", "missing"))]
+  datx[, value := factor(m_call, levels=c("Z","z","H","h"))]
+  datx[, score.me := (position %in% cpg.ref.f)]
+  
+  # dtab = datx
+  methStatsDT = function(dtab, check.chars = c("z", "Z", "h", "H", "x", "X")) {
+    names(check.chars) = check.chars
+    ms = dtab[,c("num"=.N, lapply(check.chars, FUN=function(x) sum(m_call==x))),
+              by=list(read_id, read_start, read_end, read_orientation, read_type, 
+                      dup, context, score.me)]
+    ms[ , Zz := Z+z]
+    ms[ , XxHh := X+x+H+h]
+    ms[ , frac.CpG.meth := Z/Zz]
+    ms[ , frac.CH.meth := (X+H)/XxHh]
+    ms[ , frac.meth := ifelse(context=="CpG",frac.CpG.meth, frac.CH.meth)]
+    ms
+  }    
+
+  ms.all = methStatsDT(datx)
+  
+  # https://stackoverflow.com/questions/57514328/keep-empty-groups-when-grouping-with-data-table-in-r
+  ms.CG = ms.all[context=="CpG" & score.me==T,] ## rows may differ!
+  ms.CH = ms.all[context=="CH",]  ## rows may differ!
+  ms.CH2 = ms.CH[match(ms.CG$read_id, ms.CH$read_id),]
+  zero.CG = length(unique(datx$read_id)) - nrow(ms.CG) ## some may be dups too?
+  zero.CH = length(unique(datx$read_id)) - nrow(ms.CH) ## some may be dups too?
+ 
+  ## do we need U and u?
+  # tmat = data.frame(t(mat), stringsAsFactors=F) 
+  ## too SLOW!!!
+  # for (k in 1:ncol(tmat)) tmat[,k] = factor(tmat[,k], levels=c("z","Z", "h", "H", "x", "X"))
+  
+  keep.read = which(!ms.CG$dup  & 
+                      (ms.CG$Zz >= min_frac_CG_called*length(cpg.ref.f)) &
+                      (ms.CH2$frac.CH.meth <= max_frac_nonconvert)
+  )
+
+  datxf = datx[read_id %in% ms.CG$read_id[keep.read],]
+  
+  colors.ZhHh = c("darkred","deepskyblue","orange", "green");
+  
+  ###############
+
+  split_by_type = length(unique(datx$read_type))>1
+ 
+  ## pre-compute summary stats to make ggplot objects smaller
+  
+  num.seq = length(unique(datx$read_id)) 
+  num.cpg = length(unique(levels(datx$CpG)))
+  num.ch = length(unique(levels(datx$CH)))
+
+  cat("## Per-site methylation for ", rname, " (unfiltered)\n\n", sep="")
+  cat("Ref seq has", length(cpg.ref), "CpG sites;\n")
+  cat("CpG sites", cpg.range[1], "to", cpg.range[2], "will be used for scoring;\n")
+  cat(num.seq, "reads before filtering.\n")
+  
+  datxCH = datx[context=="CH", .N, by=list(CH, value, read_type)]
+  datxCG = datx[context=="CpG", .N, by=list(CpG, value, read_type)]
+  
+  ## otherwise scale_x_discrete(drop=FALSE) gives error. 
+  # CH/CpG will have extra level NA, which can be dropped, but legend doesn't currently show up
+  if (nrow(datxCH)==0) datxCH = cbind(datx[NA,],N=0)
+  if (nrow(datxCG)==0) datxCG = cbind(datx[NA,],N=0)
+  
+  gg0a = ggplot(datxCH, aes(x=CH, y=N, fill=value)) + 
+    geom_bar(stat="identity") + 
+    scale_x_discrete(drop=FALSE, na.translate=FALSE) + 
+    ylab("number of reads") + ggtitle(rname) +
+    scale_fill_manual(values=colors.ZhHh, drop=F) +
+    theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1, size=5))
+  
+  if (split_by_type) gg0a = gg0a + facet_wrap(~read_type, ncol=1) 
+  
+  gg0b = ggplot(datxCH, aes(x=CH, y=N, fill=value)) + 
+    geom_bar(stat="identity", position="fill") + 
+    scale_x_discrete(drop=FALSE, na.translate=FALSE) + 
+    ylab("fraction of reads") + ggtitle(rname) +
+    scale_fill_manual(values=colors.ZhHh, drop=F) +
+    theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1, size=5))
+   
+  if (split_by_type) gg0b = gg0b + facet_wrap(~read_type, ncol=1) 
+  
+  gg0c = ggplot(datxCG, aes(x=CpG, y=N, fill=value)) + 
+    geom_bar(stat="identity") + 
+    scale_x_discrete(drop=FALSE, na.translate=FALSE) + 
+    ylab("number of reads") + ggtitle(rname) +
+    scale_fill_manual(values=colors.ZhHh, drop=F) +
+    theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1, size=5)) +
+    geom_vline(xintercept=cpg.range + c(-0.5, 0.5), linetype="dashed") ## numeric or factor?
+  
+  if (split_by_type) gg0c = gg0c + facet_wrap(~read_type, ncol=1) 
+  
+  gg0d = ggplot(datxCG, aes(x=CpG, y=N, fill=value)) + 
+    geom_bar(stat="identity", position="fill") + 
+    scale_x_discrete(drop=FALSE, na.translate=FALSE) + 
+    ylab("fraction of reads") + ggtitle(rname) +
+    scale_fill_manual(values=colors.ZhHh, drop=F) +
+    theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1, size=5)) +
+    geom_vline(xintercept=cpg.range + c(-0.5, 0.5), linetype="dashed") ## numeric or factor?
+   
+  if (split_by_type) gg0d = gg0d + facet_wrap(~read_type, ncol=1)
+  
+  cat("\n\n")
+  
+  print(plot_grid(gg0a, gg0b, gg0c, gg0d, ncol=2, nrow=3, rel_heights = c(1,1,0.1)))
+
+  cat("\n\n")
+  
+  cat("## Per-site methylation for ", rname, " (filtered)\n\n", sep="")
+
+  num.seq = length(unique(datxf$read_id)) 
+  num.cpg = length(unique(levels(datxf$CpG)))
+  num.ch = length(unique(levels(datxf$CH)))
+
+  ## Keep this one-line long, or allow two lines but make plots shorter 
+  cat("Read count: ", nrow(ms.CG) + zero.CG, ";\n", sep="")
+  cat("duplicates: ", sum(ms.CG$dup), ";\n", sep="")
+  cat("low CpG coverage: ", 
+      sum(!ms.CG$dup & 
+            ms.CG$Zz <  min_frac_CG_called*length(cpg.ref.f)) + zero.CG, ";\n", sep="")    
+  cat("low CH conversion: ", 
+      sum(!ms.CG$dup & 
+            ms.CG$Zz >= min_frac_CG_called*length(cpg.ref.f) & 
+            ms.CH2$frac.CH.meth > max_frac_nonconvert), ";\n", sep="") 
+  cat("remaining: ", num.seq, ".\n", sep="") 
+
+  if (sum(datxf$context=="CpG")==0) {
+     ## warning(paste0("skipping ", rname))
+     cat("\n\n (no reads)\n\n")
+     next
+  }
+  
+  datxCH = datxf[context=="CH", .N, by=list(CH, value, read_type)]
+  datxCG = datxf[context=="CpG", .N, by=list(CpG, value, read_type)]
+  
+  ## otherwise scale_x_discrete(drop=FALSE) gives error
+  if (nrow(datxCH)==0) datxCH = cbind(datxf[NA,],N=0)
+  if (nrow(datxCG)==0) datxCG = cbind(datxf[NA,],N=0)
+
+  gg0a = ggplot(datxCH, aes(x=CH, y=N, fill=value)) + 
+    geom_bar(stat="identity") + 
+    scale_x_discrete(drop=FALSE, na.translate=FALSE) + 
+    ylab("number of reads") + ggtitle(rname) +
+    scale_fill_manual(values=colors.ZhHh, drop=F) +
+    theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1, size=5))
+  
+  if (split_by_type) gg0a = gg0a + facet_wrap(~read_type, ncol=1) 
+  
+   gg0b = ggplot(datxCH, aes(x=CH, y=N, fill=value)) + 
+    geom_bar(stat="identity", position="fill") + 
+    scale_x_discrete(drop=FALSE, na.translate=FALSE) + 
+    ylab("fraction of reads") + ggtitle(rname) +
+    scale_fill_manual(values=colors.ZhHh, drop=F) +
+    theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1, size=5))
+   
+  if (split_by_type) gg0b = gg0b + facet_wrap(~read_type, ncol=1) 
+  
+  gg0c = ggplot(datxCG, aes(x=CpG, y=N, fill=value)) + 
+    geom_bar(stat="identity") + 
+    scale_x_discrete(drop=FALSE, na.translate=FALSE) + 
+    ylab("number of reads") + ggtitle(rname) + 
+    scale_fill_manual(values=colors.ZhHh, drop=F) +
+    geom_vline(xintercept=cpg.range + c(-0.5, 0.5), linetype="dashed") + 
+    theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1, size=5))
+  
+  if (split_by_type) gg0c = gg0c + facet_wrap(~read_type, ncol=1) 
+  
+  gg0d = ggplot(datxCG, aes(x=CpG, y=N, fill=value)) + 
+    geom_bar(stat="identity", position="fill") + 
+    scale_x_discrete(drop=FALSE, na.translate=FALSE) +
+    ylab("fraction of reads") + ggtitle(rname) + 
+    scale_fill_manual(values=colors.ZhHh, drop=F) +
+    geom_vline(xintercept=cpg.range + c(-0.5, 0.5), linetype="dashed") + 
+    theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1, size=5))
+  
+  if (split_by_type) gg0d = gg0d + facet_wrap(~read_type, ncol=1)
+  
+  cat("\n\n")
+  
+  print(plot_grid(gg0a, gg0b, gg0c, gg0d, ncol=2, nrow=3, rel_heights = c(1,1,0.1)))
+
+  cat("\n\n")
+  
+  ## When looking at just some CpG, might not have any calls
+  # Error in quantile.default(ms.CG$frac.CpG.meth) : 
+  # missing values and NaN's not allowed if 'na.rm' is FALSE
+
+  ##################################################
+  ##################################################
+  
+  ms.filt = methStatsDT(datxf) ## just subset rows of ms.all?
+  ms.CGf = ms.filt[context=="CpG" & score.me==T,]
+  ms.CHf = ms.filt[context=="CH",]
+  ms.CHf2 = ms.CHf[match(ms.CGf$read_id, ms.CHf$read_id),] ## any NA?
+  
+  q.colors = c("grey50", "black", "grey50")
+  
+  ##  Separate median when split_by_read=T?
+  cat("## Per-sequence methylation for ", rname, "\n\n", sep="")
+  
+  cat("Medians (Q2) are indicated by black vertical lines, Q1 and Q3 by grey lines\n\n")
+
+  # bstep=0.025
+  bstep=0.05 ## changed from earlier versiom
+  
+  maxN = max(ms.CG$num)
+
+  gg1a = ggplot(ms.CG, aes(x=frac.CpG.meth, fill=read_type)) +
+    geom_histogram(breaks=(seq(0,maxN+1)-0.5)/(maxN)-0.001, 
+                   alpha=0.5, position="identity") + ## stacked without position=identity
+     xlab("CpG methylation") +  ylab("number of reads") + ggtitle("unfiltered") +  
+     scale_x_continuous(labels = scales::percent) +
+    geom_vline(xintercept=quantile(ms.CG$frac.CpG.meth, na.rm=T)[2:4], color=q.colors, linetype="dashed")
+
+  maxN = max(ms.CH$num)
+  gg2a = ggplot(ms.CH, aes(x=frac.CH.meth, fill=read_type)) + 
+    geom_histogram(breaks=(seq(0,maxN+1)-0.5)/(maxN)-0.001, 
+                   alpha=0.5, position="identity") +
+    xlab("CH non-conversion") +  ylab("number of reads") + 
+    ggtitle("unfiltered") +
+     scale_x_continuous(labels = scales::percent) + 
+    geom_vline(xintercept=quantile(ms.CH$frac.CH.meth, na.rm=T)[2:4], color=q.colors, linetype="dashed")
+  
+  maxN = max(ms.CGf$num)
+  gg1b = ggplot(ms.CGf, aes(x=frac.CpG.meth, fill=read_type)) +
+    geom_histogram(breaks=(seq(0,maxN+1)-0.5)/(maxN)-0.001,
+                   alpha=0.5, position="identity") +
+     xlab("CpG methylation") +  ylab("number of reads") + ggtitle("filtered") +
+     scale_x_continuous(labels = scales::percent) + 
+    geom_vline(xintercept=quantile(ms.CGf$frac.CpG.meth, na.rm=T)[2:4], color=q.colors, linetype="dashed")
+  
+  maxN = max(ms.CHf$num)
+  gg2b = ggplot(ms.CHf, aes(x=frac.CH.meth, fill=read_type)) + 
+    geom_histogram(breaks=(seq(0,maxN+1)-0.5)/(maxN)-0.001,
+                   alpha=0.5, position="identity") +
+     xlab("CH non-conversion") +  ylab("number of reads") + ggtitle("filtered") +
+     scale_x_continuous(labels = scales::percent) +  
+    geom_vline(xintercept=quantile(ms.CHf$frac.CH.meth, na.rm=T)[2:4], color=q.colors, linetype="dashed")
+  
+  maxN = length(cpg.ref.f)
+  gg3a = ggplot(ms.CG, aes(x=Zz/length(cpg.ref.f), fill=read_type)) +  
+    geom_histogram(breaks=(seq(0,maxN+1)-0.5)/(maxN)-0.001,
+                   alpha=0.5, position="identity") +
+     xlab("CpG coverage") +  ylab("number of reads") + ggtitle("unfiltered") +
+     scale_x_continuous(labels = scales::percent) + 
+    geom_vline(xintercept=quantile(ms.CG$Zz/length(cpg.ref.f), na.rm=T)[2:4], color=q.colors, linetype="dashed")
+  
+  maxN = length(cpg.ref.f)
+  gg3b = ggplot(ms.CGf, aes(x=Zz/length(cpg.ref.f), fill=read_type)) + 
+    geom_histogram(breaks=(seq(0,maxN+1)-0.5)/(maxN)-0.001,
+  alpha=0.5, position="identity") +
+     xlab("CpG coverage") +  ylab("number of reads") + ggtitle("filtered") +
+     scale_x_continuous(labels = scales::percent) + 
+    geom_vline(xintercept=quantile(ms.CGf$Zz/length(cpg.ref.f), na.rm=T)[2:4], 
+               color=q.colors, linetype="dashed")
+  
+  cat("\n\n")
+  
+  print(plot_grid(gg3a, gg1a, gg2a, gg3b, gg1b, gg2b, nrow=3, ncol=3, rel_heights=c(1,1,0.3)))
+  
+  cat("\n\n")
+
+  # default for quantiles probs = seq(0, 1, 0.25)
+  probs = c(0, 0.03, 0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95, 1);
+  quantile.cols = c("min","pct03","pct05","pct10","Q1","Q2","Q3","pct90","pct95","max")  
+
+  summary_u[ref_name==rname, "reads":=length(ms.CG$frac.CpG.meth)]
+  summary_u[ref_name==rname, "mean":=100*mean(ms.CG$frac.CpG.meth, na.rm=T)]
+  quant_u = as.list(100*quantile(ms.CG$frac.CpG.meth, probs=probs, na.rm=T))
+  names(quant_u) = quantile.cols
+  summary_u[ref_name==rname, names(quant_u) := quant_u]
+  
+  summary_f[ref_name==rname, "reads":=length(ms.CGf$frac.CpG.meth)]
+  summary_f[ref_name==rname, "mean":=100*mean(ms.CGf$frac.CpG.meth, na.rm=T)]
+  quant_f = as.list(100*quantile(ms.CGf$frac.CpG.meth, probs=probs, na.rm=T))
+  names(quant_f) = quantile.cols
+  summary_f[ref_name==rname, names(quant_f) := quant_f]
+  
+  if (fit_mixture_mle) {
+  
+    cts = ms.CGf[,c("z","Z")]
+    fm = fitMixture(cts)
+   
+    cts = data.table(cts)
+    cts[, Zz := Z+z]
+    cts[, fq := Z/Zz]
+    cts[, ppc0_0 := NA]
+    cts[, ppc1_1 := 1]
+    ## cbind(cts, NULL) is error -- could perhaps use Map to do these in one call
+    if (!is.null(fm$post2))  cts = cbind(cts, fm$post2)
+    if (!is.null(fm$post2w)) cts = cbind(cts, fm$post2w)
+    if (!is.null(fm$post3))  cts = cbind(cts, fm$post3)
+    if (!is.null(fm$post3w)) cts = cbind(cts, fm$post3w)
+
+    cts.list[[rname]] = cts
+    
+    pp.col= grep("^ppc", colnames(cts))
+    
+    pvec = c(0, 0.03, 0.05, 0.1, 0.25, 0.50, 0.75, 0.9, 0.95, 1)
+    post.quantiles = data.frame(apply(cts[,pp.col, with=F], 2, FUN=function(x) 
+      awQuantile(cts$fq, weights=x, probs=pvec)))
+    post.mean = as.data.frame.list(apply(cts[,pp.col, with=F], 2, FUN=function(x) 
+      c(weighted.mean(cts$fq, w=x))))
+    rownames(post.mean) = "mean"
+    if ("ppc0_0" %in% colnames(post.mean)) post.mean[["ppc0_0"]] = mean(cts$fq)
+    post.quantiles = rbind(post.quantiles, post.mean)
+    
+    qnt.list[[rname]] = post.quantiles
+    
+    cat("\n\n## Beta-binomial mixture models for ", rname, "\n\n", sep="")
+    cat("Ordinary binomials (equivalent to *M* = Inf) are used for fit names starting with **b**.  
+        Weights *w* of all alleles are equal except for fit names starting with **u**, in which weights are also fit.\n\n")
+  
+    coef.mat = cbind(fm$coef.mat[,!c("cf", "LLK", "BIC","AICc","dAICc", "pAICc", "pBIC.3","pAICc.3","adjW")],
+                     fm$post.mat[,!c("k","mod", "fit")])
+    
+    s3.cols = grep("^m\\d+", colnames(coef.mat))
+    coef.mat[, s3.cols] = round(coef.mat[, ..s3.cols], 3)
+    s2.cols = grep("^w\\d+|^ppc\\d+", colnames(coef.mat))
+    coef.mat[, s2.cols] = round(coef.mat[, ..s2.cols], 2)
+    s1.cols = grep("^M\\d|^dBIC", colnames(coef.mat))
+    coef.mat[, s1.cols] = round(coef.mat[, ..s1.cols], 1)
+    coef.mat$use = ifelse(coef.mat$use==T, "T", "F")
+    coef.mat$pBIC = format.pval(coef.mat$pBIC, digits=2, eps=0.01) 
+  
+    coef.keep = fm$coef.mat[use==T, !c("k", "fit", "cf", "LLK","BIC","AICc","dAICc", "pAICc", 
+                                       "pBIC.3","pAICc.3","adjW", "use", "pBIC")]
+    
+    ## coef.keep[,fit:=substr(fit, 1,2)] ## just use model column
+   
+    ## requires tidyr:
+    # coef.wide = tidyr::pivot_wider(coef.keep, names_from=fit, 
+    #                          values_from=c(m1,M1, m2,M2,m3,M3, w1, w2, w3, dBIC))
+    # reshape2::dcast(coef.keep, . ~ fit, value.var="dBIC") ## just one value.var
+    
+    coef.keep$n.obs= nrow(cts) ## used for pivoting with reshape 
+    coef.wide = reshape(coef.keep, direction="wide", timevar="mod", idvar="n.obs", sep="_")
+    new.names = sapply(colnames(coef.wide), 
+                       FUN=function(x) paste(rev(strsplit(x, "_")[[1]]), collapse="."))
+    colnames(coef.wide) = new.names
+    
+    ## many columns are NA by design. Could just drop based on NA but some may be NA due to 
+    ## convergence issues. Here we we manually drop all of form .x_.y with x<y, though this
+    ## could also be done with pattern matching
+    drop.cols = c("e1.m2", "e1.M2", "e1.w2", "e1.m3", "e1.M3", "e1.w3", 
+                  "e2.m3", "e2.M3", "e2.w3",
+                  "u2.m3", "u2.M3", "u2.w3")
+    coef.wide = coef.wide[,!is.element(colnames(coef.wide), drop.cols), with=F]
+    ## both these dBICs may be small so take diff to avoid underflow
+    coef.wide[, ex.p1 := 1/(1 + exp(-(e2.dBIC-e1.dBIC)/2))]
+    coef.wide[, ex.p2 := 1/(1 + exp(-(e1.dBIC-e2.dBIC)/2))]
+    coef.wide[, ex.m1 := ex.p1*e1.m1 + ex.p2*e2.m1] 
+    coef.wide[, ex.m2 := ex.p1*e1.m1 + ex.p2*e2.m2]   
+      
+    # coef.mat$pAICc = format.pval(coef.mat$pAICc, digits=2, eps=0.01) 
+    
+    ## Note that BIC has less penalization than AIC when n=2
+    ## AIC = -2LLK + 2k
+    ## AICc = AIC + (2*k^2 + 2*k) / (n-k-1)
+    ##     = -2LLK + 2k + 2(k^2+k)/(n-k-1)
+    ## AICc, k = 2: -2LLK + 4 + 12/(n-5)
+    ## AICc, k = 4: -2LLK + 8 + 40/(n-3)
+    ## BIC,  k = 2: -2LLK + 2*sqrt(n)
+    ## BIC,  k = 4: -2LLK + 4*sqrt(n)
+    ## n=1:100; 
+    ## k=4; plot(n, k*log(n), ylim=c(0,20)); lines(n, 2*k + 2*(k^2+k)/(n-k-1)) 
+    ## k=2; points(n, k*log(n), col="red"); lines(n, 2*k + 2*(k^2+k)/(n-k-1),col="red") 
+    
+    coef.mat$dLLK = round(coef.mat$dLLK,2)
+    coef.mat$dBIC = round(coef.mat$dBIC,2)
+    
+    cat("```\n\n")
+    cat("Estimated mean (m), dispersion (M) and weight (w) for each mixture component, ordered so m1 <= m2 <= m3\n\n")
+    options(width=max_width)
+    # options(scipen=0)
+    print(coef.mat, digits=3)
+    if (!is.null(fm$fit.warnings)) cat(" note:",  fm$fit.warnings,"\n")
+    cat("\n\n```\n\n")
+    
+    cat("\n\n## Beta-binomial mixture models for ", rname, "\n\n", sep="")
+    cat("Same as previous table, but restricted to the rows with use = T --- this drops the binomial models and 
+        for the other models (e1, e2, e3, u2, u3) just the fit with the highest dLLK is shown. (The other 
+        fits for these models differ in e.g. initialization).\n\n")
+    cat("```\n\n")
+    cat("Estimated mean (m), dispersion (M) and weight (w) for each mixture component, ordered so m1 <= m2 <= m3\n\n")
+    options(width=max_width)
+    # options(scipen=0)
+    print(coef.mat[use=="T",], digits=3) ## Note: logical TRUE had been reformatted to T for printing
+    if (!is.null(fm$fit.warnings)) cat(" note:",  fm$fit.warnings,"\n")
+    cat("\n\n```\n\n")
+    
+    cat("Selected entries rearranged in a wide format, plus ex.m1 and ex.m2, which are weighted means of 
+        m values for e1 and e2 with weights ex.p1 and ex.p2 taken from pBIC column\n\n")
+    
+    cat("```\n\n")
+    print(coef.wide, digits=3)
+    cat("\n\n```\n\n")
+  
+    cat("\n\n## Beta-binomial mixture models for ", rname, "\n\n", sep="")
+  
+    cat("Estimated allele-specific methylation quantiles. Columns **ppc0_0** and **ppc1_1** are both quantiles for one-allele model, though numbers may differ slightly due to the way interpolation between datapoints in handled. The allele-specific min and max (rows 0% and 100%) should probably be ignored for *k* > 1, since there is a nonzero (even if miniscule) probability of the reads with min and max observed methylation coming from any of the alleles. \n\n")
+    cat("\n\n```\n\n")
+    print(post.quantiles, digits=3)
+    cat("\n\n```\n\n")
+    
+    cat("\n\n## Beta-binomial mixture models for ", rname, "\n\n", sep="")
+
+    cat("Comparisons of nested models with likelihood-ratio tests\n\n")
+    
+    cat("\n\n```\n\n")
+    
+    update.cols = coef.wide[, colnames(coef.wide) %in% colnames(summary_f), with=F]
+    ## CHECK: are these still the right columns to convert to percents?
+    pct.cols = grep("\\.m\\d", colnames(update.cols), value=F)
+    pct.vals = as.list(100*update.cols[,..pct.cols])
+    update.cols[,names(pct.vals) := pct.vals]
+    summary_f[ref_name==rname, names(update.cols) := as.list(update.cols)]
+    bbm.list[[rname]] = coef.mat ## use version before rounding?
+    
+    if (is.na(fm$anova1234) && is.na(fm$anova1235)) {
+      print(fm$anova123, signif.stars = F)
+    } else {
+      print(fm$anova1245, signif.stars = F)
+      cat("\n\n") 
+      print(fm$anova1235, signif.stars = F)
+    }
+    cat("\n\n```\n\n")
+    
+    ## Pr(z|A)
+    ## Pr(z|B)
+    ## Pr(A|z) = Pr(A)*Pr(z|A)/Pr(z)
+    ## Pr(B|z) = Pr(B)*Pr(z|B)/Pr(z)
+    ## Pr(z) = Pr(A)*Pr(z|A) + Pr(B)*Pr(z|B)
+    ## if pr(A) = pr(B) = 1/2:   Pr(A|z) = Pr(z|A)/(Pr(z|A) + Pr(z|B))
+    
+    options(width=max_width)
+    cat("\n\n## Fitted beta-binomial probability densities\n\n")
+    
+    cat("Here $k=n,c=j$ denotes the $j$th component in a mixture model with $n$ components. 
+        Densities of mixtures are $Pr(z|k=n) = \\sum_{j=1}^{n} w_j Pr(z|k=n,c=j)$ with individual 
+        components $Pr(z|k=n,c=j)$ shown as dashed lines. Posteriors of components for fixed $k$ 
+        (shown in plot to right) are $Pr(c=j|z,k=n) = w_j Pr(z|k=n,c=j)/Pr(z|k=n)$.\n\n")
+    cat("In these plots the weights $w_j = 1/n$ are equal, though this is not a realistic assumption 
+        for the BSSX assay; the next slide also shows plots in which $w_j$ are estimated from the 
+        data along with the other parameters (if that option was selected).\n\n") 
+   
+    maxN = max(cts$Z + cts$z)
+   
+    cf1 = coef(fm$fits[[1]])
+    cf2 = coef(fm$fits[[2]]) 
+    
+    ## stop instead of warn?
+    if (!identical(names(cf1), c("m1","M1", "w1"))) warning("unexpected coefs in cf1")
+    if (!identical(names(cf2), c("m1","M1","m2","M2","w1","w2"))) warning("unexpected coefs in cf2")
+    if (cf2["m1"] > cf2["m2"]) cf2 = cf2[c("m2","M2","m1","M1","w2","w1")]
+
+    ## beta binomial of binomial fits
+    dbetabinom2 = function(theta, ...) {
+      if (is.finite(theta)) return(dbetabinom(theta=theta, ...)) else return(dbinom(...))
+    }
+    
+    ###############################
+    
+    w1 = 0.5
+    w2 = 0.5
+    bbdf = data.table(z=0:maxN, Z=maxN:0)
+    bbdf[, d.k_1 := dbetabinom2(x=Z, size=z+Z,     prob=cf1[[1]], theta=cf1[[2]])]
+    bbdf[, d.k_2.c_1 := dbetabinom2(x=Z, size=z+Z, prob=cf2[[1]], theta=cf2[[2]])]
+    bbdf[, d.k_2.c_2 := dbetabinom2(x=Z, size=z+Z, prob=cf2[[3]], theta=cf2[[4]])]
+    bbdf[, d.k_2:= (w1*d.k_2.c_1+w2*d.k_2.c_2)]  ## equal weights here
+    bbdf[, p.k_1 := NA_real_]  ## 1, but not interesting so not plotted
+    bbdf[, p.k_2.c_1 := w1*d.k_2.c_1/(w1*d.k_2.c_1 + w2*d.k_2.c_2)]
+    bbdf[, p.k_2.c_2 := w2*d.k_2.c_2/(w1*d.k_2.c_1 + w2*d.k_2.c_2)]
+    bbdf[, p.k_2 := NA_real_]  # 1, but not interesting so not plotted
+    bb_tall = data.table(reshape2::melt(bbdf, id.vars=c("z","Z")))
+    bb_tall[, variable:= gsub(".",",",gsub("_","=", variable, fixed=T), fixed=T)]
+    bb_tall[, k := substr(variable,3,5)]
+    bb_tall[, kc := substr(variable,3,9)]
+    bb_tall[, c := substr(variable,7,9)]
+    bb_tall[, subcomp := (c != "")]
+    bb_tall[, type := substr(variable,1,1)] ## d or p
+    
+    if (vary_w) {
+      
+      ## fits[[3]] is three alleles, w not adjustable
+      cf4 = coef(fm$fits[[4]]) 
+      if (!identical(names(cf4), c("m1","M1","m2","M2","w1","w2"))) warning("unexpected coefs in cf4")
+      if (cf4["m1"] > cf4["m2"]) cf4 = cf4[c("m2","M2","m1","M1","w2","w1")]
+      
+      W1 = exp(cf4[[5]]) 
+      W2 = exp(cf4[[6]])
+      w1 = W1/(W1 + W2)
+      w2 = W2/(W1 + W2)
+      bbwdf = data.table(z=0:maxN, Z=maxN:0)
+      bbwdf[, d.k_1 := dbetabinom2(x=Z, size=z+Z,     prob=cf1[[1]], theta=cf1[[2]])]
+      bbwdf[, d.k_2.c_1 := dbetabinom2(x=Z, size=z+Z, prob=cf4[[1]], theta=cf4[[2]])]
+      bbwdf[, d.k_2.c_2 := dbetabinom2(x=Z, size=z+Z, prob=cf4[[3]], theta=cf4[[4]])]
+      bbwdf[, d.k_2:= (w1*d.k_2.c_1 + w2*d.k_2.c_2)]
+      bbwdf[, p.k_1 := NA_real_]  ## 1, but not interesting so not plotted
+      bbwdf[, p.k_2.c_1 := w1*d.k_2.c_1/(w1*d.k_2.c_1 + w2*d.k_2.c_2)]
+      bbwdf[, p.k_2.c_2 := w2*d.k_2.c_2/(w1*d.k_2.c_1 + w2*d.k_2.c_2)]
+      bbwdf[, p.k_2 := NA_real_]  ## 1, but not interesting so not plotted
+      bbw_tall = data.table(reshape2::melt(bbwdf, id.vars=c("z","Z")))
+      bbw_tall[, variable:= gsub(".",",",gsub("_","=", variable, fixed=T), fixed=T)]
+      bbw_tall[, k := substr(variable,3,5)]
+      bbw_tall[, kc := substr(variable,3,9)]
+      bbw_tall[, c := substr(variable,7,9)]
+      bbw_tall[, subcomp := (c != "")]
+      bbw_tall[, type := substr(variable,1,1)] ## d or p
+    }
+  
+    ## simple binomial fits
+    bcf1 = as.numeric(coef.mat[fit=="k1ib",c("m1","M1")]) 
+    bcf2 = as.numeric(coef.mat[fit=="k2ub",c("m1","M1","m2","M2")]) 
+    if (all(!is.na(bcf2) & bcf2[1]>bcf2[3])) bcf2 = bcf2[c(3,4,1,2)]
+    
+    w1 = 0.5
+    w2 = 0.5
+    bdf = data.table(z=0:maxN, Z=maxN:0)
+    bdf[, d.k_1 :=     dbinom(x=Z, size=z+Z, prob=bcf1[[1]])]
+    bdf[, d.k_2.c_1 := dbinom(x=Z, size=z+Z, prob=bcf2[[1]])]
+    bdf[, d.k_2.c_2 := dbinom(x=Z, size=z+Z, prob=bcf2[[3]])]
+    bdf[, d.k_2:= (w1*d.k_2.c_1 + w2*d.k_2.c_2)]
+    bdf[, p.k_1 := NA_real_]  ## 1, but not interesting so not plotted
+    bdf[, p.k_2.c_1 := w1*d.k_2.c_1/(w1*d.k_2.c_1 + w2*d.k_2.c_2)]
+    bdf[, p.k_2.c_2 := w2*d.k_2.c_2/(w1*d.k_2.c_1 + w2*d.k_2.c_2)]
+    bdf[, p.k_2 := NA_real_]  ## 1, but not interesting so not plotted
+    b_tall = data.table(reshape2::melt(bdf, id.vars=c("z","Z")))
+    b_tall[, variable:= gsub(".",",",gsub("_","=", variable, fixed=T), fixed=T)]
+    b_tall[, k := substr(variable,3,5)]
+    b_tall[, kc := substr(variable,3,9)]
+    b_tall[, c := substr(variable,7,9)]
+    b_tall[, subcomp := (c != "")]
+    b_tall[, type := substr(variable,1,1)] ## d or p
+    
+    ###############
+    
+    gg1 = ggplot(bb_tall[type=="d",], 
+                 aes(x=Z, y=value, color=kc, lty=subcomp)) +
+      geom_point() + geom_line(show.legend=F) + 
+      labs(y="prob density", color="model")
+    
+    gg2 = ggplot(bb_tall[type=="p",], 
+                 aes(x=Z, y=value, color=kc, lty=subcomp)) +
+      geom_point() + geom_line(show.legend=F) + 
+      scale_y_continuous(limits=c(0,1)) + 
+      scale_color_discrete(breaks = c("k=2,c=1", "k=2,c=2")) + 
+      labs(y="posterior prob", color="model")
+    
+    print(plot_grid(gg1, gg2, NULL, NULL, ncol=2, nrow=2))
+  
+    cat("\n\n")
+    
+    cat("\n\n## Fitted densities overlayed on observed data\n\n")
+    cat("Here densities are scaled by total read counts. Left: beta-binomial, fixed equal weights $w$; 
+        Right: beta-binomial, fitted $w$; Bottom row: reads colored by estimated probability of being from allele_1.\n\n")
+    
+    # As before, *k* indicates the total number of components in the mixture and
+    # dashed lines indicates the contribution of individual components $c = 1, ..., k$"
+    
+    # "Densities are based on the number (Z) of methylated CpG sites, out of", maxN, 
+    # "total, in a read with no missing CpG calls, which is converted to percent methylation on 
+    # the x axis. The model fitting and histogram of observed reads do account for missing CpG 
+    # calls in the observed data, though.
+    
+    maxN = max(cts$Zz)
+    scale_y = nrow(cts)
+    
+    gg1bb = ggplot(cts, aes(x=Z/Zz)) +
+      geom_histogram(breaks=(seq(0,maxN+1)-0.5)/(maxN) - 0.001, alpha=0.5, position="identity") +
+      xlab("CpG methylation") +  ylab("number of reads") + ggtitle("equal w for each component") + 
+      scale_x_continuous(labels = scales::percent) +  
+      geom_line(data=bb_tall[type=="d",], 
+                aes(x=Z/maxN, y=scale_y*value, color=kc, lty=subcomp)) +
+      geom_point(data=bb_tall[type=="d",], 
+                 aes(x=Z/maxN, y=scale_y*value, color=kc))
+    
+    if (vary_w) {
+      gg1bbw = ggplot(cts, aes(x=Z/Zz)) +
+        geom_histogram(breaks=(seq(0,maxN+1)-0.5)/(maxN) - 0.001, alpha=0.5, position="identity") +
+        xlab("CpG methylation") +  ylab("number of reads") +  ggtitle("fitted w for each component") + 
+        scale_x_continuous(labels = scales::percent) +  
+        geom_line(data=bbw_tall[type=="d",], 
+                  aes(x=Z/maxN, y=scale_y*value, color=kc, lty=subcomp)) +
+        geom_point(data=bbw_tall[type=="d",], 
+                   aes(x=Z/maxN, y=scale_y*value, color=kc))
+    } else {
+      gg1bbw = ggplot() + theme_void() + ggtitle("fits with adjustable w not done")
+    }
+    
+    ## ordinary binomial --- don't show this currently
+    # gg1b = ggplot(cts, aes(x=Z/Zz)) +
+    #   geom_histogram(breaks=(seq(0,maxN+1)-0.5)/(maxN) - 0.001, alpha=0.5, position="identity") +
+    #   xlab("CpG methylation") +  ylab("number of reads") + ggtitle("filtered") + 
+    #   scale_x_continuous(labels = scales::percent) +  
+    #   geom_line(data=b_tall[type=="d",], 
+    #             aes(x=Z/maxN, y=scale_y*value, color=kc, lty=subcomp)) +
+    #   geom_point(data=b_tall[type=="d",], 
+    #              aes(x=Z/maxN, y=scale_y*value, color=kc))
+    
+    ## Ends of gradient should roughly agree with colors for k2_c1 and k2_c2 above
+    
+    gg1qr = ggplot(cts, aes(y="", x=Z/Zz)) + geom_quasirandom(aes(col=ppc1_2), shape=1, size=1) + 
+      labs(y="approximate read density", x="mean methylation", col="Pr(allele_1)") + 
+      ggtitle("equal w for each component") + 
+      scale_x_continuous(labels = scales::percent, limits=c(0,1)) + 
+      scale_color_gradient2(limits=c(0,1), high="cyan", mid="grey20", low="magenta",
+                            midpoint=0.5, labels = scales::percent)
+    
+    if (vary_w) {
+      gg1qrw = ggplot(cts, aes(y="", x=Z/Zz)) + geom_quasirandom(aes(col=ppc1_2w), shape=1, size=1) + 
+        labs(y="approximate read density", x="mean methylation", col="Pr(allele_1)") + 
+        ggtitle("fitted w for each component") + 
+        scale_x_continuous(labels = scales::percent, limits=c(0,1)) + 
+        scale_color_gradient2(limits=c(0,1), high="cyan", mid="grey20", low="magenta",
+                              midpoint=0.5, labels = scales::percent)
+      
+    } else {
+       gg1qrw = ggplot() + theme_void() + ggtitle("fits with adjustable w not done")
+    }
+    
+    cat("\n\n") 
+    
+    print(plot_grid(gg1bb, gg1bbw, gg1qr, gg1qrw, ncol=2, nrow=2))
+    
+    cat("\n\n &nbsp; \n\n")
+   
+    ## Not sure why, but when next block is set to T, the plots above do not show up.
+    ## Adding empty plot to slide seems to fix it, though
+    
+    print(ggplot() + theme_void())
+      
+    cat("\n\n")
+    
+    ## currently just for k2 model (two components, fixed weights)
+    if (show_profiles) {
+      
+      cat("## Likelihood profiles for two-component mixture\n\n")
+      cat("Caution: unlike elsewhere, components here may not be ordered such that m1 < m2\n\n")
+      
+      p2 <- try(bbmle::profile(fm$fits[[2]]), silent=T)
+      
+      if (F) { ## for testing
+        
+        p2.1 <- try(bbmle::profile(fm$fits[[2]], which="m1", del=0.1), silent=T)
+        p2.3 <- try(bbmle::profile(fm$fits[[2]], which="m2", del=0.1), silent=T)
+        
+        # cmat =  p2.1@profile$m1$par.vals
+        # contour(x=cmat[,2], y=cmat[,3], z=p2.1@profile$m1$z)
+        # s1 <- bbmle::slice(fm$fits[[2]],verbose=FALSE)
+        
+        cc =  coef(fm$fits[[2]])
+        tranges = cbind(c(0.9,0.6,0.9,0.6)*cc ,c(1.1,1.4,1.1,1.4)*cc)
+        s1 <- bbmle::slice(fm$fits[[2]],dim=1,verbose=T, tranges=tranges)
+        s2 <- bbmle::slice(fm$fits[[2]],dim=2,verbose=T, tranges=tranges)
+        
+        sdf = s2$slices[[1]][[2]]
+        sdf$z =  sdf$z - min(sdf$z)
+        
+        sdf2 = s2$slices[[3]][[4]]
+        sdf2$z =  sdf2$z - min(sdf2$z)
+        
+        sdf3 = s2$slices[[1]][[3]]
+        sdf3$z =  sdf3$z - min(sdf3$z)
+        
+        ggplot(sdf, aes(x=x,y=y,z=sqrt(z), col=..level..)) + geom_contour() +
+          labs(x="m1", y="M1", color="|z|")
+        
+        ggplot(sdf2, aes(x=x,y=y,z=sqrt(z), col=..level..)) + geom_contour() +
+          labs(x="m2", y="M2", color="|z|")
+        
+        ggplot(sdf, aes(x=x,y=y,z=sqrt(z), col=..level..)) + geom_contour() +
+          geom_contour(data=sdf2) + labs(x="m", y="M", color="|z|")
+        
+        # require(lattice); plot(s1)
+        so1a <- bbmle::sliceOld(fm$fits[[2]],which=1, del=0.1)
+        so1b <- bbmle::sliceOld(fm$fits[[2]],which=3, del=0.1)
+        
+        mt1 = data.frame(z=so1a$profile[[1]]$z, so1a$profile[[1]]$par.vals, type="slice")
+        mt2 = data.frame(z=p2.1@profile[[1]]$z, p2.1@profile[[1]]$par.vals, type="profile")
+        mta = rbind(mt1, mt2)
+        
+        mt1 = data.frame(z=so1b$profile[[1]]$z, so1b$profile[[1]]$par.vals, type="slice")
+        mt2 = data.frame(z=p2.3@profile[[1]]$z, p2.3@profile[[1]]$par.vals, type="profile")
+        mtb = rbind(mt1, mt2)
+        
+        pdf("slice_vs_profile.pdf", width=4, height=2.6)
+        ggplot(sdf, aes(x=x,y=y,z=sqrt(z), col=..level..)) + geom_contour() +
+          labs(x="m1", y="M1", color="|z|") 
+        ggplot(sdf, aes(x=x,y=y,z=z, col=..level..)) + geom_contour() +
+          labs(x="m1", y="M1", color="z^2")
+        ggplot(sdf2, aes(x=x,y=y,z=sqrt(z), col=..level..)) + geom_contour() +
+          labs(x="m2", y="M2", color="|z|") 
+        ggplot(sdf2, aes(x=x,y=y,z=z, col=..level..)) + geom_contour() +
+          labs(x="m2", y="M2", color="z^2")
+        
+        ggplot(sdf3, aes(x=x,y=y,z=sqrt(z), col=..level..)) + geom_contour() +
+          labs(x="m1", y="m1", color="|z|") 
+        ggplot(sdf3, aes(x=x,y=y,z=z, col=..level..)) + geom_contour() +
+          labs(x="m1", y="m2", color="z^2") 
+        
+        ggplot(mta, aes(x=m1,y=abs(z), linetype=type)) + ylab("|z|") + geom_line()  
+        
+        ggplot(mta, aes(x=m1,y=abs(z), linetype=type)) + ylab("|z|") + geom_line() +
+          geom_hline(yintercept = 1.96, col="red", lty=2) + 
+          annotate("text",  x=-Inf, y=1.96, label=" 95%", col="red", hjust=0, vjust=-1)
+        
+        
+        ggplot(mta, aes(x=m1,y=abs(z), linetype=type)) + ylab("|z|") + geom_line() +
+          geom_hline(yintercept = 1.92, col="red", lty=2) + 
+          annotate("text",  x=-Inf, y=1.92, label=" 95%", col="red", hjust=0, vjust=-1)
+        
+        ggplot(mta, aes(x=m1,y=z^2, linetype=type)) + geom_line() 
+        
+        ggplot(mta, aes(x=m1,y=z^2, linetype=type)) + geom_line() +
+          geom_hline(yintercept = 1.96, col="red", lty=2) +
+          
+          annotate("text",  x=-Inf, y=1.96, label=" 95%", col="red", hjust=0, vjust=-1)
+        
+        ggplot(mtb, aes(x=m2, y=abs(z), linetype=type)) + ylab("|z|") + geom_line()
+        ggplot(mtb, aes(x=m2, y=z^2, linetype=type)) + geom_line() 
+        
+        ggplot(mtb, aes(x=m2, y=abs(z), linetype=type)) + ylab("|z|") + geom_line() +
+          geom_hline(yintercept = 1.96, col="red", lty=2) + 
+          annotate("text",  x=-Inf, y=1.96, label=" 95%", col="red", hjust=0, vjust=-1)
+        
+        ggplot(mtb, aes(x=m2, y=z^2, linetype=type)) + geom_line() +
+          geom_hline(yintercept = 1.96, col="red", lty=2) + 
+          annotate("text",  x=-Inf, y=1.96, label=" 95%", col="red", hjust=0, vjust=-1)
+        
+        
+        dev.off()
+        
+      }
+      
+      ## TODO: override hessian?
+      
+      if (is(p2, 'profile.mle2')) {
+        # p2@summary
+        p.var = sapply(p2@profile, FUN=function(x) var(x$z))
+        p.skip = (is.na(p.var) | p.var == 0)
+        tryp2 = try(plot(p2, which=which(!p.skip)), silent=T)
+        if (any(p.skip) && !is(tryp2, "try-error")) {
+          cat("skipping profiles for ", toString(names(p.var)[p.skip]), ", which 
+            are flat in range profiled\n\n", sep="")
+        }
+        cat("\n\n")
+      } 
+      if (!is(p2, 'profile.mle2') || is(tryp2, "try-error")) {
+        
+        cat("Convergence issue with profiles; showing asymptotic confidence intervals instead\n\n")
+        cat("```\n\n")
+        
+        #getOption("show.signif.stars")
+        options("show.signif.stars"=F)
+        print(summary(fm$fits[[2]]))
+        options("show.signif.stars"=T)
+        cat("\n\n```\n\n")
+      }
+      
+    }
+  }
+  
+ 
+  for (rt in read_types) {
+    
+    ### FIXME!
+    ms.rt = ms.CG[read_type==rt,]
+    if (nrow(ms.rt) > 0) {
+      #summaries_u[[rt]][rname,3] = length(ms.rt$frac.CpG.meth)
+      #summaries_u[[rt]][rname,4:12] = 100*quantile(ms.rt$frac.CpG.meth, probs=probs, na.rm=T)
+      #summaries_u[[rt]][rname,13] = 100*mean(ms.rt$frac.CpG.meth)
+    }
+    
+    ms.rt = ms.CGf[read_type==rt,]
+    if (nrow(ms.rt) > 0) {
+      #summaries_f[[rt]][rname,3] = length(ms.rt$frac.CpG.meth)
+      #summaries_f[[rt]][rname,4:12] = 100*quantile(ms.rt$frac.CpG.meth, probs=probs, na.rm=T)
+      #summaries_f[[rt]][rname,13] = 100*mean(ms.rt$frac.CpG.meth)
+    }
+    
+  }
+  
+  ######################################
+  ## save filtered and trimmed CpG mat  
+  
+  cpg.keep = seq(cpg.range[1], cpg.range[2])
+  mat.list[[rname]] = datxf[context=="CpG" & score.me & CpG %in% cpg.keep,]
+  
+  ######################################
+
+  set.seed(7)
+  
+  cat("\n\n")
+  
+  cat("## Methylation for ", rname, "\n\n", sep="")
+     
+  if (length(unique(datxf$read_id)) > max_reads_lollipop) {
+    sample.read = sample(unique(datxf$read_id), max_reads_lollipop)
+    datxf2 = datxf[read_id %in% sample.read,] 
+    cat("Showing random", max_reads_lollipop, "of", length(unique(datxf$read_id)), 
+        "filtered reads. Left: all CpGs; right: just scored CpGs\n\n")
+  } else {
+    datxf2 = datxf
+    cat("Showing all", length(unique(datxf$read_id)), 
+        "filtered reads. Left: all CpGs; right: just scored CpGs\n\n")
+  }
+  
+  # cat(length(unique(datxf2$read_id)), "reads plotted in decreasing order of pct CpG methylation:\n\n")
+  
+  ms = methStatsDT(datxf2)
+  msf = ms[context=="CpG" & score.me,]
+  read.order = msf$read_id[order(msf$frac.CpG.meth)] # etc
+  
+  num.seq = length(unique(datxf2$read_id))
+  num.cpg = length(cpg.ref) 
+  num.cpg.f = length(cpg.ref.f) 
+  datxf2$seqnum = as.numeric(factor(datxf2$read_id, levels=read.order)) 
+  datxf2$seqnum = factor(datxf2$seqnum, levels=1:max(datxf2$seqnum))
+  ## levels based on perm!
+  
+  ## need room for legend, even if there are just a few rows...
+  # fwidth = 1.0 + max(num.cpg/15, 1.5); 
+  # fheight = 0.5 + max(num.seq/15, 1.5)
+  # pdf(paste0("test_", rname, ".pdf"), width=fwidth, height=fheight, pointsize=12)
+  ## facet based on 16 and 55? 
+  
+  gg = ggplot(datxf2[context=="CpG",], aes(x=CpG, y=seqnum, color=value)) + 
+    geom_point(pch=16, size=1.2) +
+    # geom_text(aes(x=CpG, y=Inf, label=CpG), col="black", hjust=-1, vjust=-0.5)
+    scale_x_discrete(drop=FALSE) + ##  sec.axis = dup_axis()) + would have to make continuous
+    scale_color_manual(values=colors.ZhHh, drop=F) + 
+    ggtitle(paste0(rname)) + 
+    # scale_y_continuous(expand=expansion(add=1), breaks=seq(0, num.seq, by=ifelse(num.seq<=15, 1, 10))) +
+    # coord_fixed(ratio = 1) + 
+    geom_vline(xintercept=cpg.range + c(-0.5, 0.5), linetype="dashed") +
+    theme(axis.title.y=element_blank(), legend.justification="top", 
+          axis.text.y = element_text(size=5),
+          axis.text.x = element_text(angle=90, vjust=0.5, hjust=1, size=5))
+    
+  if (split_by_type) gg = gg + facet_grid(read_type~. , scales="free_y", space="free_y")
+
+  ## change width too?
+  gg1 = plot_grid(gg, ncol=2, nrow=2, 
+                     rel_heights = c(max(num.seq,5)+20, max_reads_lollipop +1-max(num.seq,5)),
+                     rel_widths = c(num.cpg+20, 64+1-num.cpg))
+  
+  datxf3 = datxf2[context=="CpG" & score.me==T,]
+  ## CpG is factor  -- want to drop from ends but not interior, so drop=T may not work
+  cpg.keep = seq(cpg.range[1], cpg.range[2])
+  datxf3$CpG = factor(as.numeric(as.character(datxf3$CpG)), levels=cpg.keep)
+  
+  gg = ggplot(datxf3, aes(x=CpG, y=seqnum, color=value)) + 
+    geom_point(pch=16, size=1.2) +
+    scale_x_discrete(drop=F) + ##  sec.axis = dup_axis()) + would have to make continuous
+    scale_color_manual(values=colors.ZhHh, drop=F) + 
+    ggtitle(paste0(rname)) + 
+    # coord_fixed(ratio = 1) + 
+    # geom_vline(xintercept=cpg.range + c(-0.5, 0.5), linetype="dashed") +
+    theme(axis.title.y=element_blank(), legend.justification="top", 
+          axis.text.y = element_text(size=5),
+          axis.text.x = element_text(angle=90, vjust=0.5, hjust=1, size=5))
+  
+  if (split_by_type) gg = gg + facet_grid(read_type~. , scales="free_y", space="free_y")
+  
+  gg2 = plot_grid(gg, ncol=2, nrow=2, 
+                  rel_heights = c(max(num.seq,5)+20, max_reads_lollipop +1-max(num.seq,5)),
+                  rel_widths = c(num.cpg.f+20, 64+1-num.cpg.f))
+  
+  print(plot_grid(gg1, gg2, nrow=1))
+  
+  cat("\n\n")
+  
+  rm(datx)
+  gc6 = gc()
+  
+}
+
+cat("\n\n")
+
+
+```
+
+## Summary tables
+
+* Even for unfiltered data, **reads** includes only those covering at least one CpG in the scored window, so may be less than the total number of reads mapping to **ref_name**. 
+* The columns **pctNN** give the *NN*-th percentile of percent methylation, and the columns **QN** give the *N*-th quartile of percent methylation (Q1 = pct25, Q2 = pct50 = median and Q3 = pct75).
+* The columns **ei.mj** and **ei.Mj**  are maximum-likelihood estimates of the mean methylation percentages (*m*) and dispersion (*M*) for the *j*-th allele in a model **ei** with *i* alleles, all with **e**qual weights *w*. Alleles are ordered so *m1 &le; m2 ( &le; m3 )*.  
+* The columns **ui.mj**, **ui.Mj** and **ui.wj**  are analogous but in models **u2** and **u3** in which weights *w* are also fit by maximum likelihood so can be **u**nequal
+* The columns **ex.m1**  and **ex.m2** are estimates of means based on a weighted average of the one- and two-component models **e1** and **e2**,  with **ex.mj = ex.p1 * e1.m1 +  ex.p2 * e2.mj**. 
+* Weights **ex.p1** and **ex.p2** are based on the Bayesian Information Criterion (BIC) for the fitted one- and two-component models **e1** and **e2**; they sum to 1 and are proportional to exp(-BIC/2) (and also to exp(-dBIC/2), where dBIC  (delta BIC) is BIC with the smallest BIC of any model subtracted off).
+* Columns **dLLK** are log-likelihoods (LLKs) with the largest LLK of any model subtracted off.
+* BIC = -2 LLK + *kn*~par~, where *k* = log(reads) and  *n*~par~ is the number of parameters for the model (*i* for models **bi**, 2*i* for models **ei** and 3*i* for models **ui**)
+* Note that in earlier plots the parameters *m* as given as a fraction rather than a percentages.
+
+```{r ss, echo=F, results="asis"}
+
+cat("## Summary table: unfiltered \n\n")
+
+kable(summary_u[,c(1,3:20)], digits=2) ## skip read_type. 15:20 are NA 
+cat("\n\n")
+
+if (F) {
+  for (rt in setdiff(read_types,"any")) {
+    print(kable(summaries_u[[rt]][,-1], digits=2)) 
+    cat("\n\n")
+  }
+}
+
+cat("## Summary table: filtered (page 1 of 2) \n\n")
+kable(summary_f[,c(1,3:20)], digits=2)  ## skip read_type
+cat("\n\n&nbsp;\n\n")
+# cat("## Summary table: filtered \n\n")
+kable(summary_f[,c(1,21:32)], digits=2) 
+cat("\n\n")
+
+cat("## Summary table: filtered (page 2 of 2) \n\n")
+kable(summary_f[,c(1,33:45), with=F], digits=2) 
+cat("\n\n&nbsp;\n\n")
+# cat("## Summary table: filtered \n\n")
+kable(summary_f[,c(1,46:ncol(summary_f)), with=F], digits=2) 
+cat("\n\n")
+
+if (F) {
+  for (rt in setdiff(read_types,"any")) {
+    print(kable(summaries_f[[rt]][,-1], digits=2))
+    cat("\n\n")
+  }
+}
+  
+summary_uf = rbind(cbind(filtered="NO", summary_u), cbind(filtered="YES", summary_f))
+
+if (length(setdiff(read_types,"any")) > 0) {
+  
+  summaries_uf = rbind(cbind(filtered="NO",  do.call(rbind, summaries_u)), 
+                       cbind(filtered="YES", do.call(rbind, summaries_f)))
+  summary_uf = rbind(summary_uf, summaries_uf)
+  
+}
+
+summary_uf = summary_uf[order(filtered, read_type, ref_name),]
+  
+write.table(format(summary_uf, nsmall=2), file=out_txt, sep="\t", row.names=F, quote=F)
+
+save(mat.list, cts.list, bbm.list, qnt.list, summary_uf, file=out_rdata)
+
+```
+
+
+## Memory usage
+
+Table `dat_all` is `r nrow(dat_all)` by  `r ncol(dat_all)` and `r format(object.size(dat_all), units="MB")`.
+
+```{r mem, echo=F, collapse=TRUE}
+
+cat("checkpoint 1:")
+print(gc1)
+cat("checkpoint 2:")
+print(gc2)
+cat("checkpoint 3:")
+print(gc3)
+cat("checkpoint 4:")
+print(gc4)
+cat("checkpoint 5:")
+print(gc5)
+cat("checkpoint 6:")
+print(gc6)
+
+```
+
+## Session info {.tiny}
+
+```{r si, echo=F}
+
+pander::pander(sessionInfo())
+
+```
+
+## END
+                                               

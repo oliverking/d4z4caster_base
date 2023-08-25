@@ -1,0 +1,996 @@
+---
+title: "BSS summary"
+output:
+  #pdf_document: default
+  html_document: default
+params:
+  ref_file: /Users/ok/bisulfite_2020/bss_test_bt/ref_v3/ref_v3_pad100.fa
+  in_file: /Users/ok/bisulfite_2020/JFBSS_0002/bismark_txt/any_C_context_local.PLJ10378_bismark_bt2.txt.gz
+  bam_file: /Users/ok/bisulfite_2020/JFBSS_0002/bismark_bam/local.PLJ10378_bismark_bt2.sorted.bam
+  out_txt: report_PLJ20219.txt
+editor_options:
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+# knitr::opts_knit$set(root.dir = getwd())
+
+# 0.1.2 -
+# - added 10-th and 90th percentile to output
+# - sort result seqs in same order as ref fasta
+# - rotated xlabs in a couple more plots
+# - got rid of in_path = "."
+# - adjusted CpG ranges a little
+
+## TODO: read  run stats -- DONE
+## TODO: read OT/OB/CTOT/CTOB file -- DONE
+## TODO: facet by read_type -- DONE
+## TODO: split by CpG 16 and 55 for 4A --- added decoys
+## TODO: dedup without casting to matrix?
+## TODO: score subset of CpG sites -- DONE
+
+## check bismark reports: https://nf-co.re/methylseq/dev/output
+
+# this flag tries to take the strand a bisulfite read originated from into 
+# account (this is different from ordinary DNA alignment flags!))
+
+# http://dldcc-web.brc.bcm.edu/lilab/deqiangs/data/GO/WGBS/b5/test_bismark/bismark_v0.7.2/RELEASE_NOTES.txt
+# This new version of the bismark2SAM conversion script introduces adjusted bitwise FLAG
+# values for non-directional single-end and for paired-end alignments. This is to better
+# reflect the strand origin of a read or a read pair. E.g., alignments to the OT strand
+# are always found in '+' orientation, whereas alignments to the CTOT strand are always found
+# in a '-' orientation. Both these alignments will now get a FLAG value of '0' indicating that
+# the read originated from the original top strand. A similar logic is also applied for
+# alignments to other strands and for paired-end alignments. Thanks to Enrique Vidal for
+# bringing this to my attention and for his contributions to this new version.
+
+# knitr::opts_knit$set(root.dir
+# options(width=120)
+# Sys.setenv(RSTUDIO_PANDOC=/Applications/RStudio.app/Contents/MacOS/pandoc)
+# Sys.getenv("RSTUDIO_PANDOC") "/Applications/RStudio.app/Contents/MacOS/pandoc"
+# knitr::knit("~/Dropbox/r_bss_summary.Rmd", output="test.html")
+# Sys.setenv(RSTUDIO_PANDOC='/usr/lib/rstudio-server/bin/pandoc')
+# rmarkdown::render("~/Dropbox/r_bss_summary.Rmd", params=list(ref_file="ref_100b/bss_ref_100b.fa",in_file= "any_C_context_local.PLJ10067_bismark_hisat2.txt.gz"), output_file="~/oktest_PLJ10067.html")
+
+```
+
+```{r init, include=F}
+
+library(Biostrings)
+library(ggplot2)
+library(reshape2)
+library(knitr)
+library(gridExtra)
+library(data.table)
+library(R.utils)
+library(Gviz)
+
+```
+
+```{r load, include=F}
+
+## note: just for CG in user-specified range!
+min.frac.CG.called = 0.9
+max.frac.nonconvert = 0.1
+
+out_path = "." ## 
+# if (!dir.exists(out_path)) dir.create(out_path)
+
+## ref_path = "~/bisulfite_2020/"
+#  ref_file =  "ref_100b/bss_ref_100b.fa"
+
+ref_file = params$ref_file
+ref = readDNAStringSet(ref_file)
+npad = 100;
+ref2 = DNAStringSet(substr(ref, npad+1, width(ref)-npad))
+
+out_txt = file.path(out_path, params$out_txt)
+
+## downsampled to <100 reads per seq
+bam_file = params$bam_file
+
+
+
+## FIXME: pass as params?  give range in nt rather than CpG?
+cpg.ranges = list("4AL" = c(9,29),
+                  "4B168" = c(2,13),
+                  "4A161"= c(32,56),
+                  "4A161x55"= c(32,55),
+                  "4A161_x16_x55"= c(32,55),
+                  "4A166"= c(32,55),
+                  "10A176T"= c(32,55),
+                  "BSSX" = c(32,58))
+## if missing then what?
+# in plots Inf gets moved to highest index so shows up in plots.                  
+#BSSA: CpG28 - 57
+#BSSX: CpG30 – 59
+
+## FIX to use relative paths!
+# in_path = "." ### ~/bisulfite_2020/JFBSS_0002"
+# in_file = "any_C_context_local.IonXpress_004_bismark_hisat2.txt.gz"
+in_file = params$in_file
+# in_file = "JFBSS_0002/bismark_txt/any_C_context_local.PLJ10379_bismark_hisat2.txt.gz"
+
+
+log_file = sub("any_C_context_", "", sub(".txt.gz", "_SE_report.txt", in_file))
+
+has_log = file.exists(file.path(log_file))
+
+if (has_log) {
+  run_info = scan(file.path(log_file), what="character", sep="\n")
+} else {
+  run_info = NULL
+}
+
+## use fread instead
+# dat_all = read.table(file.path(in_path, in_file), skip=1, stringsAsFactors=F) ## 40s
+
+## with R utils can read gz directly
+dat_all = data.table::fread(file.path(in_file), skip=1, stringsAsFactors=F) 
+
+colnames(dat_all) = c("read_id", "m_state", "ref_name", "position", "m_call", "read_start", "read_end", "read_orientation")
+
+if (F) {
+  # "JFBSS_0002/bismark_txt/any_C_context_local.PLJ10379_bismark_hisat2.txt.gz"
+  dd = dat_all[ref_name=="4A_10A" & position==660,]
+  table(dd$m_call)
+  ## 6127z, 12Z --- but none are really CpGs!
+  
+  dat_all[ref_name=="4A_10A" & position==662,]
+  # read_id m_state ref_name position m_call read_start read_end read_orientation
+  #  1: X3UV3:03990:06408       +   4A_10A      662      Z        695      588                -
+  #  2: X3UV3:04006:06441       +   4A_10A      662      Z        695      597                -
+  #  3: X3UV3:04020:06525       +   4A_10A      662      Z        695      583                -
+  
+  # (12) NM-tag (edit distance to the reference)
+  # (13) MD-tag (base-by-base mismatches to the reference (handles indels)
+  # (14) XM-tag (methylation call string)
+  # (15) XR-tag (read conversion state for the alignment)
+  # (16) XG-tag (genome conversion state for the alignment)
+  # (17) XA/XB-tag (non-bisulfite mismatches) (optional!)
+  
+  # samtools view local.PLJ10379_bismark_hisat2.bam | grep X3UV3:03990:06408
+#  X3UV3:03990:06408	0	4A_10A	588	22	108M	*	0	0
+#  GGTTTGTTTTTTTTGTGTTTTTGTGTTATTGTTGTTCGTTTGTTCGGGTTTTTGTAGTTGTTTAGGTGTTAGTACGGAGTTTTTGGCGGTTAAAAGTATATTTTTGTT	
+#  )/)//5"55555555<5$/////9/)//)0/57/254:2<9:5552;<+>>>;;654689198974447;8555<8==>+???;9?<:>:>2>><55548)===B?7;	
+#  NM:i:51	MD:Z:2C1C1C0C1C0C1C2C1C0C0C0C0C1C1C0C1C0C2C1C0C2C0C0C1C0C4C0C0C0C2C2C0C0T0C0C0C2C2C0C2C0G5C1C0C7C5C3C0C1C3C0
+#  XM:Z:..h.z.hh.hh.x..z.hhhxz.z.hh.xz..z.hxZ.hxz.hxZ...hhhx..x..hh.hhx.....hx..z.Z....h.hx...Z...h.....h...hh.x...x	XR:Z:GA	XG:Z:CT
+################################################################################^------CpG55
+    
+  
+  
+}
+
+# <seq-ID>  <methylation state*>  <chromosome>  <start position (= end position)>  <methylation call>  <read start>  <read end>  <read orientation>
+# Methylated cytosines receive a '+' orientation,
+# Unmethylated cytosines receive a '-' orientation.               
+
+format(object.size(dat_all), units="MB")
+
+```
+
+
+```{r context, echo=F}
+
+
+dat_all$read_type = "any"
+
+## add more detailed info on strand: OT, OB, CTOT, CTOB
+ctx_stubs = c(outer(c("CHG", "CpG", "CHH"), c("OT", "OB", "CTOT", "CTOB"), FUN=paste, sep="_"))
+
+for (stub in ctx_stubs) {
+  ctx_file = file.path(sub("any_C_context", stub, in_file))
+  if (file.exists(ctx_file)) {
+    ctx_mat = data.table::fread(ctx_file, skip=1, stringsAsFactors=F) 
+    ctx_reads = unique(ctx_mat[[1]]) 
+    # cat(stub, "\n\n")
+    # print(head(ctx_reads))
+    dat_all$read_type[dat_all$read_id %in% ctx_reads] = sub("^C.._", "", stub)
+  }  
+}
+
+read_types = unique(dat_all$read_type)
+
+# table(dat_all$read_orientation, dat_all$read_type)
+
+```
+
+
+### Reference file: `r ref_file`
+
+Note: the references sequences are padded with Ns during mapping but these Ns are trimmed below. 
+
+```{r ref}
+
+show(ref2)
+
+
+```
+
+Differences in some of the reference sequences above are not evident from the start and end 
+regions shown above. Below is a detail of some of the reference sequences from positions 541 to 580.
+Sequence 4A_x55 differs from 4A_10A *only* in the G>A difference at position 561 (G in 55th CpG), 
+and is included as a decoy for reads that aren't caught by 4A166_BSSA or 10A176T_BSSA, which differ 
+from 4A_10A at this site as well as a few other sites.
+
+
+```{r ref2, include=T}
+
+
+ref3 = DNAMultipleAlignment(subseq(ref2[3:6], 541, 580))
+
+show(ref3)
+
+# just for single seq
+# Views(ref2[[1]])
+
+#mal = DNAMultipleAlignment(ref2[3:6])
+#colmask(mal) = IRanges(start=1, end=500)
+#colmask(mal) = IRanges(start=601, end=ncol(mal))
+# view portal that keep coordinates?
+# subseq(ref2[3:6], 530, 590)
+
+```
+
+```{r bams}
+
+if (F) {
+  # library(Gviz)
+  # bam_file= "/Users/ok/bisulfite_2020/JFBSS_0002/bismark_bam/local.PLJ10378_bismark_bt2.sorted.bam"
+  # alchrom = "4A_10A"
+  for (alchrom in names(refs)) {
+    alfrom = npad
+    alto  =  width(ref[alchrom])-npad
+    options(ucscChromosomeNames=FALSE)
+    setrack  = SequenceTrack(ref, chromosome=alchrom)
+    getrack = GenomeAxisTrack()
+    altrack = AlignmentsTrack(bam_file, chromosome=alchrom, isPaired=F)
+    plotTracks(c(setrack, getrack, altrack), chromosome=alchrom, 
+               from=alfrom, to=alto, margin=2, main=alchrom, cex.main=1)
+  }
+}
+
+```
+
+```{r preptables}
+
+summary_u = data.frame(ref_name=names(ref2), ## sort or not? 
+                       read_type="all",
+                       reads=NA, 
+                       min=NA,
+                       pct05=NA,
+                       pct10=NA,
+                       Q1=NA,
+                       Q2=NA,
+                       Q3=NA,
+                       pct90=NA,
+                       pct95=NA,
+                       max=NA,
+                       mean=NA,
+                       stringsAsFactors=F)
+rownames(summary_u) = summary_u$ref_name;
+
+summary_f = summary_u
+
+summaries_u = list()
+summaries_f = list()
+
+for (rt in read_types) {
+  temp = summary_f
+  temp[,2] = rt
+  summaries_u[[rt]] = temp
+  summaries_f[[rt]] = temp
+}
+
+
+# Biostrings::pairwiseAlignment(ref2[[1]], ref2[[3]], type="local")
+# Local PairwiseAlignmentsSingleSubject (1 of 1)
+# pattern: [296] CCTGCAGCCTCCCAGCTGCCAGCGCGGAGCTCCTGG  ## of 331 <-- very end
+# subject: [538] CCTGCAGCCTCCCAGCTGCCAGCGCGGAGCTCCTGG  ## of 671
+
+# pwa = Biostrings::pairwiseAlignment(ref2[1], ref2[3], type="global")
+
+
+```
+
+### Bismark alignment summary:
+
+```{r log, echo=F}
+
+if (has_log) cat(run_info, sep="\n")
+
+```
+
+### Methylation output file: `r in_file`
+
+# Number of reads by C-context and orientation
+
+In the plots below X and x are merged into H and h, respectively.
+
+```
+#   # From BISMARK help file:
+#   # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   # ~~~   X   for methylated C in CHG context                      ~~~
+#   # ~~~   x   for not methylated C CHG                             ~~~
+#   # ~~~   H   for methylated C in CHH context                      ~~~
+#   # ~~~   h   for not methylated C in CHH context                  ~~~
+#   # ~~~   Z   for methylated C in CpG context                      ~~~
+#   # ~~~   z   for not methylated C in CpG context                  ~~~
+#   # ~~~   U   for methylated C in Unknown context (CN or CHN       ~~~
+#   # ~~~   u   for not methylated C in Unknown context (CN or CHN)  ~~~
+#   # ~~~   .   for any bases not involving cytosines                ~~~
+#   # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+                                                   
+```
+
+```{r bam, echo=F, include=F}
+### any way to easily display BAM coverage? BED files?
+```
+
+
+```{r summary}
+
+dat_agg = dat_all[,list(num_sites=.N, num_reads=sum(!duplicated(read_id))), 
+                  by=list(ref_name, read_type, read_orientation)]
+kable(dat_agg, caption="counts of sites and reads per ref_name")
+
+gc1=gc()
+
+dat_agg = dat_all[,list(num_sites=.N), by=list(ref_name, read_type, read_orientation, m_call)]
+dat_agg_2d = tidyr::pivot_wider(dat_agg, names_from=c(m_call), 
+                                values_from=num_sites, names_sort=T, values_fill=0)
+kable(dat_agg_2d, caption="counts of sites by methylation status")
+
+gc2=gc()
+
+
+# kable(table(ref_name = dat_all$ref_name[uqid]), caption="reads per ref_name")
+# should be same, if no multimappers:
+## table(dat_all$ref_nam[!duplicated(dat_all[,c("read_id", "ref_name")])])
+#
+# kable(table(dat_all$ref_name[uqid], dat_all$read_orientation[uqid]), caption="reads per ref_name by orientation") 
+#
+# kable(table(dat_all$ref_name[uqid], dat_all$read_type[uqid]), caption="reads per ref_name by OT/OB/CTOT/CTOB") 
+#
+# kable(table(dat_all$ref_name,  dat_all$m_call), caption="sites per ref_name by methylation")
+#
+# kable(table(paste(dat_all$ref_name,dat_all$read_orientation), dat_all$m_call), 
+#      caption="sites per (ref_name & orientation) by methylation")
+#
+# xtabs(as.factor(ref_name) ~ m_call + read_orientation, data=dat_all)
+# kable(table(dat_all$ref_name,  dat_all$m_call, dat_all$read_orientation, useNA="ifany")) 
+
+```
+
+### Memory usage
+
+Table `dat_all` is `r nrow(dat_all)` by  `r ncol(dat_all)` and `r format(object.size(dat_all), units="MB")`.
+
+```{r mem, echo=F}
+
+print(gc1)
+
+```
+
+# Plots for each reference sequence
+
+Filtered plots exclude reads that satisfy any of the conditions below:
+
+ - have methylation call (Z or z) in fewer than `r paste0(min.frac.CG.called*100, "%")` of CpG contexts in defined range
+ - have more than `r paste0(max.frac.nonconvert*100, "%")` non-converted Cs in CH contexts
+ - match already-included read at all C positions (CpG and CH contexts)
+
+```{r refs, fig.width=6, fig.height=6,  results="asis", warning=F}
+
+# format(object.size(dat_all), units="MB")
+
+# dat_all$m_call4 = dat_all$m_call
+# dat_all$m_call4[dat_all$m_call=="x"] = "h"
+# dat_all$m_call4[dat_all$m_call=="X"] = "H"
+
+# format(object.size(dat_all), units="MB
+
+### Clumpy for de-duping unaligned fastq? https://www.biostars.org/p/225338/
+
+## keep order from ref??
+
+observed_refs = unique(dat_all$ref_name)
+observed_refs = observed_refs[order(match(observed_refs, names(ref)))]
+
+for (rname in observed_refs) {
+  
+ # rname =c("4A_4B168","4A_10A","4A_AL", "BSSX")[3] 
+  
+  cat("\n\n")
+  
+  cat("##", rname, "\n\n")
+  
+  refseq = as.character(ref[[rname]])
+  cpg.ref = as.integer(gregexpr("CG", refseq, ignore.case=T)[[1]])
+  c.all = as.integer(gregexpr("C", refseq, ignore.case=T)[[1]])
+  c.drop = as.integer(gregexpr("CN|C$|C.$", refseq, ignore.case=T)[[1]])
+  c.ref = setdiff(c.all, c.drop)
+  cph.ref = setdiff(c.ref, cpg.ref)
+  # drop last site?
+  
+  if (rname %in% names(cpg.ranges)) {  
+    cpg.range = cpg.ranges[[rname]]
+  } else {
+    cpg.range = c(1, Inf)
+  }
+  
+  cpg.range[1] = max(cpg.range[1], 1)
+  cpg.range[2] = min(cpg.range[2], length(cpg.ref))
+  
+  cpg.ref.f = cpg.ref[seq(cpg.range[1],  cpg.range[2])]
+  
+  cat("ref has", length(cpg.ref), "CpG sites\n\n")
+  cat("CpG sites", cpg.range[1], "to", cpg.range[2], "will be used for scoring\n\n")
+  
+  #####
+  # datx = dat_all[ref_name==rname,] ## make later, after picking random subset
+  # format(object.size(dat_all), units="MB") ## 3.1GB
+  # format(object.size(datx), units="MB")    ## 2.4GB
+  
+  # datx$m_call4 = sub("x", "h", sub("X", "H", datx$m_call))
+  # format(object.size(datx), units="MB")    ## 2.7GB
+  
+  ref_dex = which(dat_all$ref_name==rname)
+  # cxx.bismark = sort(unique(dat_all$position[ref_dex])); 
+  cxx.bismark = dat_all[ref_name==rname, sort(unique(position))]; 
+  
+  max_reads = 100000
+  # read_names1 = dat_all[ref_name==rname & m_call4 %in% c("z","Z"), unique(read_id)]
+  # read_names2 = dat_all[ref_name==rname & m_call4 %in% c("h","H"), unique(read_id)]
+  # format(object.size(read_names), units="MB")
+  # format(object.size(read_names1), units="MB")
+  #read_names = intersect(read_names1, read_names2) 
+  #c(length(read_names1), length(read_names2), length(read_names))
+
+  #  read_names = dat_all[ref_name==rname, unique(read_id)]
+  read_names = unique(dat_all$read_id[ref_dex])
+  gc3 = gc()
+  
+  if (length(read_names) > max_reads) {
+    set.seed(7)
+    warning(paste0(rname, ": keeping random ", as.integer(max_reads), " of ", length(read_names), " reads"))
+    keep_names = sample(read_names, max_reads) 
+    ## 2nd should be automatic, if no multimappers
+    datx = dat_all[(read_id %in% keep_names) & ref_name==rname, ]
+  } else {
+    datx = dat_all[ref_dex,]
+    # datx = dat_all[(read_id %in% read_names) & ref_name==rname,]
+  }
+  gc4 = gc()
+  # format(object.size(datx), units="MB")    ## ~600 Mb
+  
+  datx$m_call[datx$m_call=="x"] = "h"
+  datx$m_call[datx$m_call=="X"] = "H"
+  
+  ## is is strictly necessary to make matrix? for finding duplicates, maybe?
+  ## make a sparse matrix? --- probably not worth it
+  ## change storage from char to int?
+  mat = reshape2::dcast(datx, read_id ~ position, value.var="m_call")
+  rownames(mat) = mat$read_id ## makenames()?
+  mat = mat[,-1]
+  dim(mat)  
+  format(object.size(mat), units="MB")    ## ~140 Mb
+  
+  #numGoodR = rowSums(!is.na(mat))
+  #summary(numGoodR) 
+  #numGoodC = colSums(!is.na(mat)) 
+  #summary(numGoodC)
+  
+  ## NA treated like any other entry, both for vector and matrix
+  # duplicated(c(1,2,2,NA,NA))
+  ## duplicated(rbind(c(1,2), c(1,3), c(1,3), c(NA,3), c(NA,3), c(NA,NA)))
+  is.dup = duplicated(mat) 
+  datx$dup = (datx$read_id %in% rownames(mat)[is.dup])
+  table(datx$dup)
+  
+  rm(mat)
+  gc5 = gc()
+  
+  ## exact dups. version without NAs? or cutoff on hamming dist?
+  #apply(mat, 2, table) ## a lot of mixed sites, but usually 1 dominant
+  
+  ### make this optional?
+  # if (sum(is.dup)>0) {
+  #  warning(paste0(rname, ": dropping duplicates (", sum(is.dup) , " of ",nrow(mat),")"))
+  #  mat = mat[!is.dup, , drop=F]
+  #  ## keep IDs, ref back to datx?
+  #}
+  
+  # context = apply(mat, 2, FUN=function(x) table(factor(toupper(x), levels=c("H", "X", "Z")))
+  # CG.dex1 = which(context["Z",] > 5 & context["Z",] >= 0.8*colSums(context)) 
+  # CG.dex2 = which(context["Z",] > 1 & context["Z",] >= 0.6*colSums(context)) 
+  
+  ## include cph range as well?
+  
+  ### identical, if just ACGTN?
+  # setdiff(cxx.bismark, c.ref)
+  # setdiff(c.ref, cxx.bismark)
+  ############################
+  
+  # table(cpg.ref %in% cxx.bismark)
+  #  227 234 242 never observed?
+  
+  cpg.missed = setdiff(cpg.ref, cxx.bismark)
+  
+  if (length(cpg.missed)>0) {
+    warning(paste0("missed cpgs for ", rname, ": ", paste(cpg.missed, collapse=",")))
+    ## relabel based on all coords? Relabel based on index in c.ref
+  }
+  
+  c.gained = setdiff(cxx.bismark, c.ref)
+  
+  if (length(c.gained)>0) {
+    warning(paste0("gained c for ", rname, ": ", paste(c.gained, collapse=",")))
+    ## relabel based on all coords? Relabel based on index in c.ref
+  }
+  
+  ################# not used ############### 
+  # CG.dex = which(cxx.bismark %in% cpg.ref)
+  # CH.dex = which(!(cxx.bismark %in% cpg.ref))
+  ########################################## 
+  
+  match.cpg = match(datx$position, cpg.ref)
+  
+  ## keep as integers for now?
+  # as.numeric(as.factor(2:7))  ## 1:6
+  # as.numeric(as.character(as.factor(2:7))) ## 2:7
+  datx$CpG = factor(match.cpg, levels=1:length(cpg.ref))
+  datx$CH = factor(match(datx$position, cph.ref), levels=1:length(cph.ref))
+  datx$C = factor(match(datx$position, c.ref), levels=1:length(c.ref))
+  datx$context = ifelse(!is.na(datx$CpG), "CpG", ifelse(!is.na(datx$CH), "CH", "missing"))
+  datx$value  = factor(datx$m_call, levels=c("Z","z","H","h"))
+  
+  datx$score.me = datx$position %in% cpg.ref.f
+  
+  # format(object.size(datx), units="MB")    ## ~768 Mb
+  
+  # table(datx$score.me, useNA="always")
+  # table(datx$score.me, datx$context, useNA="always")
+
+  # table(is.na(datx$C))
+  # table(is.na(datx$CH), is.na(datx$CpG))
+  # table(datx$context)
+  ##########
+  
+  # dtab = datx
+  meth.stats.dt = function(dtab, check.chars = c("z", "Z", "h", "H", "x", "X")) {
+    names(check.chars) = check.chars
+    ms = dtab[,c("num"=.N, lapply(check.chars, FUN=function(x) sum(m_call==x))),
+              by=list(read_id, read_start, read_end, read_orientation, read_type, dup, context, score.me)]
+    ms$Zz = rowSums(ms[,c("Z","z")])
+    ms$XxHh = rowSums(ms[,c("X","x", "H", "h")])
+    ms$frac.CpG.meth = ms$Z/ms$Zz;
+    ms$frac.CH.meth = rowSums(ms[,c("X","H")])/ms$XxHh;
+    ms
+  }    
+
+  ms.all = meth.stats.dt(datx)
+  # dim(ms.all)
+  # length(unique(ms.all$read_id)) ## 100k, as it should be!
+  ## ms.all[, .N, by=list(context, score.me)] okay, some may have CpG but not in score.me set
+  
+  # ms.all.c = data.table(tidyr::complete(ms.all, read_id, context))
+  # ms.all.c[is.na(num),] tibble rather than data.table -- all values are NA
+ 
+  # https://stackoverflow.com/questions/57514328/keep-empty-groups-when-grouping-with-data-table-in-r
+  ms.CG = ms.all[context=="CpG" & score.me,] ## rows may differ!
+  ms.CH = ms.all[context=="CH",]  ## rows may differ!
+  ms.CH2 = ms.CH[match(ms.CG$read_id, ms.CH$read_id),]
+  zero.CG = length(unique(datx$read_id)) - nrow(ms.CG) ## some may de dups too?
+  zero.CH = length(unique(datx$read_id)) - nrow(ms.CH) ## some may de dups too?
+  
+  summary(ms.CG$frac.CpG.meth)
+  summary(ms.CH$frac.CH.meth)
+  
+  ## do we need U and u?
+  # tmat = data.frame(t(mat), stringsAsFactors=F) 
+  ## too SLOW!!!
+  # for (k in 1:ncol(tmat)) tmat[,k] = factor(tmat[,k], levels=c("z","Z", "h", "H", "x", "X"))
+  
+  keep.read = which(!ms.CG$dup  & 
+                      (ms.CG$Zz >= min.frac.CG.called*length(cpg.ref.f)) &
+                      (ms.CH2$frac.CH.meth <= max.frac.nonconvert)
+  )
+
+  datxf = datx[read_id %in% ms.CG$read_id[keep.read],]
+  
+  if (sum(datxf$context=="CpG")==0) {
+    warning(paste0("skipping ", rname))
+    cat("\n\n")
+    next
+  }
+
+  colors.ZhHh = c("darkred","deepskyblue","orange", "green");
+  
+  ###############
+
+  split_by_type = length(unique(datx$read_type))>1
+ 
+  ## v2: pre-compute summary stats to make ggplot objects smaller!
+  
+  cat("### before filtering:\n\n")
+  
+  num.seq = length(unique(datx$read_id)) 
+  num.cpg = length(unique(levels(datx$CpG)))
+  num.ch = length(unique(levels(datx$CH)))
+
+  cat(num.seq, "reads\n\n")
+  
+  datxCH = datx[context=="CH", .N, by=list(CH, value, read_type)]
+  datxCG = datx[context=="CpG", .N, by=list(CpG, value, read_type)]
+  
+  gg0a = ggplot(datxCH, aes(x=CH, y=N, fill=value)) + 
+    geom_bar(stat="identity") + 
+    scale_x_discrete(drop=FALSE) + ylab("number of reads") + ggtitle(rname) +
+    scale_fill_manual(values=colors.ZhHh, drop=F) +
+    theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1, size=5))
+  
+  if (split_by_type) gg0a = gg0a + facet_wrap(~read_type, ncol=1) 
+  
+   gg0b = ggplot(datxCH, aes(x=CH, y=N, fill=value)) + 
+    geom_bar(stat="identity", position="fill") + 
+    scale_x_discrete(drop=FALSE) + ylab("fraction of reads") + ggtitle(rname) +
+    scale_fill_manual(values=colors.ZhHh, drop=F) +
+    theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1, size=5))
+   
+  if (split_by_type) gg0b = gg0b + facet_wrap(~read_type, ncol=1) 
+  
+  grid.arrange(gg0a, gg0b, ncol=1, nrow=2)
+  
+  cat("\n\n") 
+   
+  gg0a = ggplot(datxCG, aes(x=CpG, y=N, fill=value)) + 
+    geom_bar(stat="identity") + 
+    scale_x_discrete(drop=FALSE) + ylab("number of reads") + ggtitle(rname) +
+    scale_fill_manual(values=colors.ZhHh, drop=F) +
+    theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1, size=5)) +
+    geom_vline(xintercept=cpg.range + c(-0.5, 0.5), linetype="dashed") ## numeric or factor?
+  
+  if (split_by_type) gg0a = gg0a + facet_wrap(~read_type, ncol=1) 
+  
+   gg0b = ggplot(datxCG, aes(x=CpG, y=N, fill=value)) + 
+    geom_bar(stat="identity", position="fill") + 
+    scale_x_discrete(drop=FALSE) + ylab("fraction of reads") + ggtitle(rname) +
+    scale_fill_manual(values=colors.ZhHh, drop=F) +
+    theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1, size=5)) +
+    geom_vline(xintercept=cpg.range + c(-0.5, 0.5), linetype="dashed") ## numeric or factor?
+   
+  if (split_by_type) gg0b = gg0b + facet_wrap(~read_type, ncol=1)
+  
+  grid.arrange(gg0a, gg0b, ncol=1, nrow=2)
+  
+  cat("\n\n")
+  
+  cat("### after filtering:\n\n")
+
+  # keep.read = which(!ms.CG$dup  & 
+  #  (ms.CH2$frac.CH.meth <= max.frac.nonconvert) & 
+  #  (ms.CG$Zz >= min.frac.CG.called*length(CG.dex)))
+
+  num.seq = length(unique(datxf$read_id)) 
+  num.cpg = length(unique(levels(datxf$CpG)))
+  num.ch = length(unique(levels(datxf$CH)))
+
+  ### CHECK counts!
+  
+  cat("before filtering:", nrow(ms.CG) + zero.CG, "\n\n")
+  cat("filtered out: duplicate:", sum(ms.CG$dup), "\n\n")
+  cat("filtered out: low CpG coverage in target range:", 
+      sum(!ms.CG$dup & 
+            ms.CG$Zz <  min.frac.CG.called*length(cpg.ref.f)) + zero.CG, "\n\n")    
+  cat("filtered out: low CH conversion:", 
+      sum(!ms.CG$dup & 
+            ms.CG$Zz >= min.frac.CG.called*length(cpg.ref.f) & 
+            ms.CH2$frac.CH.meth > max.frac.nonconvert), "\n\n") 
+  cat("remaining reads:", num.seq, "\n\n") 
+
+  datxCH = datxf[context=="CH", .N, by=list(CH, value, read_type)]
+  datxCG = datxf[context=="CpG", .N, by=list(CpG, value, read_type)]
+  
+  gg0a = ggplot(datxCH, aes(x=CH, y=N, fill=value)) + 
+    geom_bar(stat="identity") + 
+    scale_x_discrete(drop=FALSE) + ylab("number of reads") + ggtitle(rname) +
+    scale_fill_manual(values=colors.ZhHh, drop=F) +
+    theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1, size=5))
+  
+  if (split_by_type) gg0a = gg0a + facet_wrap(~read_type, ncol=1) 
+  
+   gg0b = ggplot(datxCH, aes(x=CH, y=N, fill=value)) + 
+    geom_bar(stat="identity", position="fill") + 
+    scale_x_discrete(drop=FALSE) + ylab("fraction of reads") + ggtitle(rname) +
+    scale_fill_manual(values=colors.ZhHh, drop=F) +
+    theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1, size=5))
+   
+  if (split_by_type) gg0b = gg0b + facet_wrap(~read_type, ncol=1) 
+  
+  grid.arrange(gg0a, gg0b, ncol=1, nrow=2)
+  
+  cat("\n\n") 
+   
+  gg0a = ggplot(datxCG, aes(x=CpG, y=N, fill=value)) + 
+    geom_bar(stat="identity") + 
+    scale_x_discrete(drop=FALSE) + ylab("number of reads") + ggtitle(rname) +
+    scale_fill_manual(values=colors.ZhHh, drop=F) +
+    geom_vline(xintercept=cpg.range + c(-0.5, 0.5), linetype="dashed") + 
+    theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1, size=5))
+  
+  if (split_by_type) gg0a = gg0a + facet_wrap(~read_type, ncol=1) 
+  
+   gg0b = ggplot(datxCG, aes(x=CpG, y=N, fill=value)) + 
+    geom_bar(stat="identity", position="fill") + 
+    scale_x_discrete(drop=FALSE) + ylab("fraction of reads") + ggtitle(rname) +
+    scale_fill_manual(values=colors.ZhHh, drop=F) +
+    geom_vline(xintercept=cpg.range + c(-0.5, 0.5), linetype="dashed") + 
+    theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1, size=5))
+   
+  if (split_by_type) gg0b = gg0b + facet_wrap(~read_type, ncol=1)
+  
+  grid.arrange(gg0a, gg0b, ncol=1, nrow=2)
+
+  cat("\n\n")
+
+  ## when looking at just some CpG, might not have any calls
+  # Error in quantile.default(ms.CG$frac.CpG.meth) : 
+  # missing values and NaN's not allowed if 'na.rm' is FALSE
+
+  ##################################################
+  ##################################################
+  
+  ms.filt = meth.stats.dt(datxf) ## just subset rows of ms.all?
+  ms.CGf = ms.filt[context=="CpG" & score.me,]
+  ms.CHf = ms.filt[context=="CH",]
+  ms.CHf2 = ms.CHf[match(ms.CGf$read_id, ms.CHf$read_id),] 
+
+  q.colors = c("grey50", "black", "grey50")
+  
+  ##  Separate median when split_by_read=T?
+  
+  cat("In the plots below, medians (for all read_types combined) are indicated by black vertical lines, 
+      Q1 and Q3 by grey lines\n\n")
+
+  gg1a = ggplot(ms.CG, aes(x=frac.CpG.meth, fill=read_type)) +
+    geom_histogram(breaks=seq(0,1,0.025), alpha=0.5, position="identity") + ## stacked without position=identity
+     xlab("CpG methylation") +  ylab("number of reads") + ggtitle("unfiltered") +  
+     scale_x_continuous(labels = scales::percent) +
+    geom_vline(xintercept=quantile(ms.CG$frac.CpG.meth, na.rm=T)[2:4], color=q.colors, linetype="dashed")
+  
+  gg2a = ggplot(ms.CH, aes(x=frac.CH.meth, fill=read_type)) + 
+    geom_histogram(breaks=seq(0,1,0.025), alpha=0.5, position="identity") +
+    xlab("CH non-conversion") +  ylab("number of reads") + 
+    ggtitle("unfiltered") +
+     scale_x_continuous(labels = scales::percent) + 
+    geom_vline(xintercept=quantile(ms.CH$frac.CH.meth, na.rm=T)[2:4], color=q.colors, linetype="dashed")
+  
+  gg1b = ggplot(ms.CGf, aes(x=frac.CpG.meth, fill=read_type)) +
+    geom_histogram(breaks=seq(0,1,0.025),alpha=0.5, position="identity") +
+     xlab("CpG methylation") +  ylab("number of reads") + ggtitle("filtered") +
+     scale_x_continuous(labels = scales::percent) + 
+    geom_vline(xintercept=quantile(ms.CGf$frac.CpG.meth, na.rm=T)[2:4], color=q.colors, linetype="dashed")
+  
+  gg2b = ggplot(ms.CHf, aes(x=frac.CH.meth, fill=read_type)) + 
+    geom_histogram(breaks=seq(0,1,0.025),alpha=0.5, position="identity") +
+     xlab("CH non-conversion") +  ylab("number of reads") + ggtitle("filtered") +
+     scale_x_continuous(labels = scales::percent) +  
+    geom_vline(xintercept=quantile(ms.CHf$frac.CH.meth, na.rm=T)[2:4], color=q.colors, linetype="dashed")
+  
+  gg3a = ggplot(ms.CG, aes(x=Zz/length(cpg.ref.f), fill=read_type)) +  
+    geom_histogram(breaks=seq(0,1,0.025), alpha=0.5, position="identity") +
+     xlab("CpG coverage") +  ylab("number of reads") + ggtitle("unfiltered") +
+     scale_x_continuous(labels = scales::percent) + 
+    geom_vline(xintercept=quantile(ms.CG$Zz/length(cpg.ref.f), na.rm=T)[2:4], color=q.colors, linetype="dashed")
+  
+  gg3b = ggplot(ms.CGf, aes(x=Zz/length(cpg.ref.f), fill=read_type)) + 
+    geom_histogram(breaks=seq(0,1,0.025), alpha=0.5, position="identity") +
+     xlab("CpG coverage") +  ylab("number of reads") + ggtitle("filtered") +
+     scale_x_continuous(labels = scales::percent) + 
+    geom_vline(xintercept=quantile(ms.CGf$Zz/length(cpg.ref.f), na.rm=T)[2:4], color=q.colors, linetype="dashed")
+  
+  grid.arrange(gg3a, gg3b, gg1a, gg1b, gg2a, gg2b, nrow=3, ncol=2)
+  
+  cat("\n\n")
+
+  probs = c(0, 0.05,0.1, 0.25,0.5,0.75,0.9, 0.95, 1);
+  # default is probs = seq(0, 1, 0.25)
+  
+  summary_u[rname,3] =  length(ms.CG$frac.CpG.meth)
+  summary_u[rname,4:12] = 100*quantile(ms.CG$frac.CpG.meth, probs=probs, na.rm=T)
+  summary_u[rname,13] =  100*mean(ms.CG$frac.CpG.meth, na.rm=T)
+ 
+  summary_f[rname,3] = length(ms.CGf$frac.CpG.meth)
+  summary_f[rname,4:12] = 100*quantile(ms.CGf$frac.CpG.meth, probs=probs, na.rm=T)
+  summary_f[rname,13] = 100*mean(ms.CGf$frac.CpG.meth, na.rm=T)
+ 
+  for (rt in read_types) {
+    
+    ms.rt = ms.CG[read_type==rt,]
+    if (nrow(ms.rt) > 0) {
+      summaries_u[[rt]][rname,3] = length(ms.rt$frac.CpG.meth)
+      summaries_u[[rt]][rname,4:12] = 100*quantile(ms.rt$frac.CpG.meth, probs=probs, na.rm=T)
+      summaries_u[[rt]][rname,13] = 100*mean(ms.rt$frac.CpG.meth)
+    }
+    
+    ms.rt = ms.CGf[read_type==rt,]
+    if (nrow(ms.rt) > 0) {
+      summaries_f[[rt]][rname,3] = length(ms.rt$frac.CpG.meth)
+      summaries_f[[rt]][rname,4:12] = 100*quantile(ms.rt$frac.CpG.meth, probs=probs, na.rm=T)
+      summaries_f[[rt]][rname,13] = 100*mean(ms.rt$frac.CpG.meth)
+    }
+    
+  }
+  
+  ######################################
+  
+  max.reads = 100
+  set.seed(7)
+  
+  if (length(unique(datxf$read_id)) > max.reads) {
+    sample.read = sample(unique(datxf$read_id), max.reads)
+    datxf2 = datxf[read_id %in% sample.read,] 
+    cat("randomly selecting", max.reads, "of", length(unique(datxf$read_id)), "filtered reads to plot.", "\n\n")
+  } else {
+    datxf2 = datxf
+  }
+  
+  cat(length(unique(datxf2$read_id)), "reads plotted in decreasing order of pct CpG methylation:\n\n")
+  
+  ms = meth.stats.dt(datxf2)
+  msf = ms[context=="CpG" & score.me,]
+  read.order = msf$read_id[order(msf$frac.CpG.meth)] # etc
+  
+  if (rname=="4A_10A") {
+    
+    if (F) {
+      
+      ### what's the dip in coverage in CH?
+      plot(table(datxf$pos[datxf$context=="CH"]))
+      plot(table(datxf$CH[datxf$context=="CH"]))
+      plot(diff(table(datxf$CH[datxf$context=="CH"])))
+      ## dip at 99 and 148
+      
+      ### all include padding of 100!
+      datxf[context=="CH" & CH=="99",][1,] # position 468, C=129.  
+      datxf[context=="CH" & CH=="148",][1,] # position 594, C=194
+      
+      ## check in IGV
+      ## ah, okay: SNP is in the G site rather than the C cite!
+      
+      datxf[context=="CpG" & CpG=="16",][1,] # position 293, C=60 
+      datxf[context=="CpG" & CpG=="55",][1,] # position 660, C=233
+      datxf[context=="CpG" & CpG=="56",][1,] # position 662, C=234
+      
+    }
+
+  }
+  
+  num.seq = length(unique(datxf2$read_id))
+  num.cpg = length(cpg.ref) # length(levels(datxf2$CpG))
+  num.cpg.f = length(cpg.ref.f) # length(levels(datxf2$CpG))
+  datxf2$seqnum = as.numeric(factor(datxf2$read_id, levels=read.order)) 
+  datxf2$seqnum = factor(datxf2$seqnum, levels=1:max(datxf2$seqnum))
+  ## levels based on perm!
+  
+  ## need room for legend, even if there are just a few rows...
+  # fwidth = 1.0 + max(num.cpg/15, 1.5); 
+  # fheight = 0.5 + max(num.seq/15, 1.5)
+  # pdf(paste0("test_", rname, ".pdf"), width=fwidth, height=fheight, pointsize=12)
+  
+  ## facet based on 16 and 55? 
+  
+  gg = ggplot(datxf2[context=="CpG",], aes(x=CpG, y=seqnum, color=value)) + 
+    geom_point(pch=16, size=1.5) +
+    # geom_text(aes(x=CpG, y=Inf, label=CpG), col="black", hjust=-1, vjust=-0.5)
+    scale_x_discrete(drop=FALSE) + ##  sec.axis = dup_axis()) + would have to make continuous
+    scale_color_manual(values=colors.ZhHh, drop=F) + 
+    ggtitle(paste0(rname)) + 
+    # scale_y_continuous(expand=expansion(add=1), breaks=seq(0, num.seq, by=ifelse(num.seq<=15, 1, 10))) +
+    # coord_fixed(ratio = 1) + 
+    geom_vline(xintercept=cpg.range + c(-0.5, 0.5), linetype="dashed") +
+    theme(axis.title.y=element_blank(), legend.justification="top", 
+          axis.text.y = element_text(size=5),
+          axis.text.x = element_text(angle=90, vjust=0.5, hjust=1, size=5))
+    
+  if (split_by_type) gg = gg + facet_grid(read_type~. , scales="free_y", space="free_y")
+
+  cat("\n\n")
+  
+  ## change width too?
+  grid.arrange(gg, ncol=2, nrow=2, 
+               heights = c(max(num.seq,5)+20, max.reads+1-max(num.seq,5)),
+               widths = c(num.cpg+20, 64+1-num.cpg))
+  
+  cat("\n\n")
+  
+  cat("same plot as above, but only showing CpG sites in target range\n\n")
+  
+  datxf3 = datxf2[context=="CpG" & score.me,]
+  ## CpG is factor  -- want to drop from ends but not interior, so drop=T may not work
+  cpg.keep = seq(cpg.range[1], cpg.range[2])
+  datxf3$CpG = factor(as.numeric(as.character(datxf3$CpG)), levels=cpg.keep)
+  
+  gg = ggplot(datxf3, aes(x=CpG, y=seqnum, color=value)) + 
+    geom_point(pch=16, size=1.5) +
+    scale_x_discrete(drop=F) + ##  sec.axis = dup_axis()) + would have to make continuous
+    scale_color_manual(values=colors.ZhHh, drop=F) + 
+    ggtitle(paste0(rname)) + 
+    # coord_fixed(ratio = 1) + 
+    # geom_vline(xintercept=cpg.range + c(-0.5, 0.5), linetype="dashed") +
+    theme(axis.title.y=element_blank(), legend.justification="top", 
+          axis.text.y = element_text(size=5),
+          axis.text.x = element_text(angle=90, vjust=0.5, hjust=1, size=5))
+  
+  if (split_by_type) gg = gg + facet_grid(read_type~. , scales="free_y", space="free_y")
+  
+  cat("\n\n")
+  
+  grid.arrange(gg, ncol=2, nrow=2, 
+               heights = c(max(num.seq,5)+20, max.reads+1-max(num.seq,5)),
+               widths = c(num.cpg.f+20, 64+1-num.cpg.f))
+  
+  cat("\n\n")
+  
+  rm(datx)
+  gc6 = gc()
+  
+  ## cat("done with", rname, "\n\n")
+  
+  
+}
+
+cat("\n\n")
+
+
+```
+
+### Summaries
+
+Note: even for the unfiltered data, thee count of **reads** below includes only those reads covering at least one CpG in the scored window, so may in some cases be less than the total number of reads mapping to **ref_name**.
+
+```{r ss, echo=F, results="asis"}
+
+kable(summary_u[,-1], digits=2, caption="summary of percent methylation: unfiltered")
+
+for (rt in setdiff(read_types,"any")) {
+  print(kable(summaries_u[[rt]][,-1], digits=2, caption="summary of percent methylation: unfiltered"))
+  cat("\n\n")
+}
+
+kable(summary_f[,-1], digits=2, caption="summary of percent methylation: filtered")
+
+for (rt in setdiff(read_types,"any")) {
+  print(kable(summaries_f[[rt]][,-1], digits=2, caption="summary of percent methylation: filtered"))
+  cat("\n\n")
+  
+}
+
+
+summary_uf = rbind(data.frame(filtered="NO", summary_u), data.frame(filtered="YES", summary_f))
+
+if (length(setdiff(read_types,"any"))>0) {
+  
+  summaries_uf = rbind(data.frame(filtered="NO", do.call(rbind, summaries_u)), 
+                       data.frame(filtered="YES", do.call(rbind, summaries_f)))
+  summary_uf = rbind(summary_uf, summaries_uf)
+  
+}
+
+summary_uf = summary_uf[order(summary_uf$filtered, summary_uf$read_type, summary_uf$ref_name),]
+  
+write.table(format(summary_uf, nsmall=2), file=out_txt, sep="\t", row.names=F, quote=F)
+
+```
+
+### Session Info
+
+```{r si, echo=F}
+
+pander::pander(sessionInfo())
+
+```
+## END
+                                               

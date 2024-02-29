@@ -1,5 +1,4 @@
 #  Instructions for D4Z4caster program
- *(final name TBD)*
 
 ---
 
